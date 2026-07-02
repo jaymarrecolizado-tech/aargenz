@@ -600,11 +600,11 @@
           .pdf-content {
             position: relative;
             z-index: 1;
-            padding: 14mm 20mm 34mm;
+            padding: 14mm 20mm 30mm;
             line-height: 1.6;
           }
           .page-one .pdf-content {
-            padding-top: 13mm;
+            padding-top: 10mm;
           }
           .continuation {
             padding-top: 20mm;
@@ -619,21 +619,21 @@
             width: 100%;
           }
           .info-table {
-            margin-bottom: 10mm;
+            margin-bottom: 8mm;
             border: 1.5px solid #0000cc;
             font-size: 10pt;
           }
           .info-table th {
-            width: 31%;
+            width: 28%;
             text-align: left;
             background: #0000cc;
             color: #fff;
-            padding: 3px 7px;
+            padding: 4px 8px;
             border: 1px solid #0000cc;
             font-weight: 700;
           }
           .info-table td {
-            padding: 3px 7px;
+            padding: 4px 8px;
             border: 1px solid #0000cc;
             vertical-align: middle;
           }
@@ -642,15 +642,15 @@
             text-decoration: underline;
           }
           h2 {
-            margin: 0 0 6mm;
+            margin: 0 0 5mm;
             font-size: 11pt;
             font-weight: 700;
           }
           h2 span {
-            margin-left: 8mm;
+            margin-left: 6mm;
           }
           h3 {
-            margin: 0 0 4mm 13mm;
+            margin: 0 0 3mm 12mm;
             font-size: 10.5pt;
             font-style: italic;
             font-weight: 700;
@@ -659,13 +659,13 @@
             font-weight: 400;
           }
           .body-text {
-            margin: 0 0 12mm 0;
+            margin: 0 0 10mm 0;
             font-size: 10.5pt;
-            line-height: 1.85;
+            line-height: 1.8;
             text-align: justify;
           }
           .body-text p {
-            margin: 0 0 4mm;
+            margin: 0 0 3mm;
             text-indent: 11mm;
           }
           .blue-table {
@@ -786,10 +786,11 @@
             position: absolute;
             left: 20mm;
             right: 20mm;
-            bottom: 10mm;
+            bottom: 12mm;
             min-height: 7mm;
             font-size: 8.5pt;
             color: #0000cc;
+            z-index: 2;
           }
           .pdf-ref {
             position: absolute;
@@ -810,6 +811,7 @@
             color: #000;
             font-size: 8pt;
             font-weight: 600;
+            z-index: 2;
           }
           .pdf-footer-img {
             position: absolute;
@@ -817,6 +819,7 @@
             right: 0;
             bottom: 0;
             width: 100%;
+            z-index: 1;
             display: block;
           }
           @media print {
