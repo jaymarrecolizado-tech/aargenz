@@ -242,7 +242,7 @@ export default function AARApp() {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
-          "Authorization": "Bearer YOUR_OPENROUTER_API_KEY",
+          "Authorization": `Bearer ${CONFIG.OPENROUTER_API_KEY}`,
           "HTTP-Referer": "https://yoursite.com",
           "X-Title": "AAR Generator"
         },
