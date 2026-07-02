@@ -60,13 +60,13 @@
       content: "Hello! I'll help you create your Accomplishment Activity Report. Let's start — what is the **title of the activity**?"
     };
 
-    function ReportPreview({ data, photos, onUpdate, headerImg, footerImg }) {
+    function ReportPreview({ data, photos, onUpdate, onRemovePhoto, headerImg, footerImg }) {
       const [editField, setEditField] = useState(null);
       const [editValue, setEditValue] = useState("");
       const [editDeep, setEditDeep] = useState(null);
       
-      const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-      const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+      const facilitatorMale = data.facilitators.filter(f => /^m(ale)?$/i.test(f.gender?.trim())).length;
+      const facilitatorFemale = data.facilitators.filter(f => /^f(emale)?$/i.test(f.gender?.trim())).length;
 
       const b = data.beneficiaries;
       const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
@@ -222,18 +222,27 @@
             <div style={{fontWeight:"bold", fontStyle:"italic", marginBottom:"12px", paddingLeft:"24px"}}>A. PHOTOS <span style={{fontStyle:"italic", fontWeight:"normal"}}>(must be action picture)</span></div>
             {photos.length > 0 ? (
               <div>
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"4px", border:"2px solid #0000cc", padding:"4px"}}>
-                  {photos.slice(0,4).map((p,i) => (
-                    <img key={i} src={p} alt={`Photo ${i+1}`} style={{width:"100%", aspectRatio:"4/3", objectFit:"cover"}}/>
-                  ))}
-                </div>
-                {photos.length > 4 && (
-                  <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"4px", border:"2px solid #0000cc", padding:"4px", marginTop:"4px"}}>
-                    {photos.slice(4,8).map((p,i) => (
-                      <img key={i+4} src={p} alt={`Photo ${i+5}`} style={{width:"100%", aspectRatio:"4/3", objectFit:"cover"}}/>
-                    ))}
-                  </div>
-                )}
+                {(() => {
+                  const rows = [];
+                  for (let i = 0; i < photos.length; i += 2) {
+                    const chunk = photos.slice(i, i + 2);
+                    const isLastOdd = i + 2 >= photos.length && chunk.length === 1;
+                    rows.push(
+                      <div key={i} style={{display:"grid", gridTemplateColumns: isLastOdd ? "1fr" : "1fr 1fr", gap:"4px", border:"2px solid #0000cc", padding:"4px", marginTop: i > 0 ? "4px" : undefined}}>
+                        {chunk.map((p, j) => (
+                          <div key={i+j} style={{position:"relative", aspectRatio:"4/3", overflow:"hidden"}}>
+                            <img src={p} alt={`Photo ${i+j+1}`} style={{width:"100%", height:"100%", objectFit:"cover"}}/>
+                            {onRemovePhoto && (
+                              <button onClick={() => onRemovePhoto(i+j)} style={{position:"absolute", top:"4px", right:"4px", width:"22px", height:"22px", borderRadius:"50%", border:"none", background:"rgba(220,53,69,0.85)", color:"#fff", fontSize:"12px", fontWeight:"bold", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1}}>x</button>
+                            )}
+                          </div>
+                        ))}
+                        {isLastOdd && <div style={{aspectRatio:"4/3"}}></div>}
+                      </div>
+                    );
+                  }
+                  return rows;
+                })()}
               </div>
             ) : (
               <div style={{border:"2px dashed #aaa", padding:"40px", textAlign:"center", color:"#999", margin:"0 0 16px 24px"}}>Upload photos using the button above</div>
@@ -376,6 +385,10 @@
         });
       };
 
+      const removePhoto = (index) => {
+        setPhotos(prev => prev.filter((_, i) => i !== index));
+      };
+
       const escapeHtml = (value) => String(value ?? "")
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
@@ -397,8 +410,8 @@
       const buildPdfDocument = () => {
         const data = reportData;
         const b = data.beneficiaries || {};
-        const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-        const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+        const facilitatorMale = data.facilitators.filter(f => /^m(ale)?$/i.test(f.gender?.trim())).length;
+        const facilitatorFemale = data.facilitators.filter(f => /^f(emale)?$/i.test(f.gender?.trim())).length;
         const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
         const benFemale = (b.ngas?.female||0)+(b.lgus?.female||0)+(b.sucs?.female||0)+(b.others?.female||0);
         const totalMale = facilitatorMale + benMale;
@@ -501,17 +514,18 @@
             <main class="pdf-content continuation">
               <h2>IV. <span>ANNEXES</span></h2>
               <h3>A. PHOTOS <em>(must be action picture)</em></h3>
-              <div class="photo-grid">${photoCells}</div>
-              ${photos.length > 4 ? `
-                <div class="photo-grid" style="page-break-before: always; margin-top: 10mm;">
-                  ${[...Array(4)].map((_, i) => {
-                    const src = photos[i + 4];
-                    return src
-                      ? `<div class="photo-slot"><img src="${img(src)}" alt="Photo ${i + 5}"></div>`
-                      : `<div class="photo-slot empty"></div>`;
-                  }).join("")}
-                </div>
-              ` : ""}
+              ${(() => {
+                const grids = [];
+                for (let i = 0; i < photos.length; i += 4) {
+                  const chunk = photos.slice(i, i + 4);
+                  const isLast = i + 4 >= photos.length;
+                  const isOdd = chunk.length % 2 !== 0 && chunk.length > 1;
+                  grids.push(`<div class="photo-grid${isOdd ? ' single-col' : ''}"${i > 0 ? ' style="page-break-before: always; margin-top: 8mm;"' : ''}>
+                    ${chunk.map((src, j) => `<div class="photo-slot"><img src="${img(src)}" alt="Photo ${i + j + 1}"></div>`).join("")}
+                  </div>`);
+                }
+                return grids.join("");
+              })()}
 
               <table class="signature-table">
                 <tbody>
@@ -546,19 +560,20 @@
         w.document.write(`<!DOCTYPE html><html><head><title>AAR Report</title>
         <base href="${baseHref}">
         <style>
-          * { box-sizing: border-box; }
+          * { box-sizing: border-box; margin: 0; padding: 0; }
           @page {
             size: A4;
             margin: 0;
           }
-          html,
-          body {
+          html, body {
             margin: 0;
             padding: 0;
-            font-family: 'Times New Roman', serif;
+            font-family: 'Times New Roman', 'Georgia', serif;
             font-size: 11pt;
-            color: #000;
+            color: #1a1a1a;
             background: #fff;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
           }
           .pdf-page {
             position: relative;
@@ -587,7 +602,8 @@
           .pdf-content {
             position: relative;
             z-index: 1;
-            padding: 14mm 19mm 34mm;
+            padding: 14mm 20mm 34mm;
+            line-height: 1.6;
           }
           .page-one .pdf-content {
             padding-top: 13mm;
@@ -598,14 +614,14 @@
           .pdf-header-img {
             display: block;
             width: 100%;
-            margin: 0 auto 9mm;
+            margin: 0 auto 8mm;
           }
           table {
             border-collapse: collapse;
             width: 100%;
           }
           .info-table {
-            margin-bottom: 11mm;
+            margin-bottom: 10mm;
             border: 1.5px solid #0000cc;
             font-size: 10pt;
           }
@@ -705,15 +721,19 @@
           .photo-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 1mm;
+            gap: 2mm;
             border: 1.5px solid #0000cc;
-            padding: 1mm;
-            margin: 12mm 0 14mm;
+            padding: 2mm;
+            margin: 10mm 0 12mm;
+          }
+          .photo-grid.single-col {
+            grid-template-columns: 1fr;
           }
           .photo-slot {
-            height: 55mm;
+            height: 52mm;
             overflow: hidden;
             background: #f5f5f5;
+            border: 0.5px solid #ddd;
           }
           .photo-slot img {
             display: block;
@@ -722,29 +742,32 @@
             object-fit: cover;
           }
           .signature-table {
-            border: 1px solid #0000cc;
+            border: 1.5px solid #0000cc;
             font-size: 10pt;
+            margin-top: 14mm;
           }
           .signature-table td {
             width: 50%;
-            height: 32mm;
+            height: 36mm;
             border: 1px solid #0000cc;
             padding: 5mm 7mm 3mm;
             vertical-align: top;
           }
           .signature-name {
-            margin-top: 14mm;
+            margin-top: 16mm;
             font-weight: 700;
             text-align: center;
             text-transform: uppercase;
+            font-size: 10.5pt;
           }
           .signature-name + div {
             text-align: center;
             text-transform: uppercase;
             font-size: 9.5pt;
+            color: #333;
           }
           .copy-furnish {
-            margin-top: 4mm;
+            margin-top: 5mm;
             color: #0000cc;
             font-style: italic;
             font-size: 10pt;
@@ -754,12 +777,12 @@
             left: 0;
             right: 0;
             bottom: 0;
-            height: 22mm;
+            height: 24mm;
           }
           .pdf-footer-meta {
             position: absolute;
-            left: 19mm;
-            right: 19mm;
+            left: 20mm;
+            right: 20mm;
             bottom: 10mm;
             min-height: 7mm;
             font-size: 8.5pt;
@@ -783,6 +806,7 @@
             transform: translateX(-50%);
             color: #000;
             font-size: 8pt;
+            font-weight: 600;
           }
           .pdf-footer-img {
             position: absolute;
@@ -839,8 +863,8 @@
         if (!reportData) return;
         const data = reportData;
         const b = data.beneficiaries || {};
-        const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-        const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+        const facilitatorMale = data.facilitators.filter(f => /^m(ale)?$/i.test(f.gender?.trim())).length;
+        const facilitatorFemale = data.facilitators.filter(f => /^f(emale)?$/i.test(f.gender?.trim())).length;
         const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
         const benFemale = (b.ngas?.female||0)+(b.lgus?.female||0)+(b.sucs?.female||0)+(b.others?.female||0);
         const totalMale = facilitatorMale + benMale;
@@ -979,8 +1003,8 @@
         if (!reportData) return;
         const data = reportData;
         const b = data.beneficiaries || {};
-        const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-        const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+        const facilitatorMale = data.facilitators.filter(f => /^m(ale)?$/i.test(f.gender?.trim())).length;
+        const facilitatorFemale = data.facilitators.filter(f => /^f(emale)?$/i.test(f.gender?.trim())).length;
         const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
         const benFemale = (b.ngas?.female||0)+(b.lgus?.female||0)+(b.sucs?.female||0)+(b.others?.female||0);
         const totalMale = facilitatorMale + benMale;
@@ -1184,7 +1208,7 @@ ${esc(data.preparedBy?.position)}\\par
               <div style={{width:"100%", maxWidth:"850px"}}>
                 {reportData ? (
                   <div style={{background:"#fff", borderRadius:"12px", overflow:"hidden", boxShadow:"0 4px 24px rgba(0,0,100,0.15)"}}>
-                    <ReportPreview data={reportData} photos={photos} onUpdate={updateReportData} headerImg={headerImgData} footerImg={footerImgData}/>
+                    <ReportPreview data={reportData} photos={photos} onUpdate={updateReportData} onRemovePhoto={removePhoto} headerImg={headerImgData} footerImg={footerImgData}/>
                   </div>
                 ) : (
                   <div style={{textAlign:"center", padding:"80px 24px", color:"#666"}}>
