@@ -7,6 +7,8 @@
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/html-docx-js@0.3.1/dist/html-docx.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
   <script src="./config.js"></script>
 </head>
 <body>
@@ -259,7 +261,7 @@
           <div style={{marginTop:"20px", overflow:"hidden"}}>
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"9pt", marginBottom:"6px"}}>
               <div style={{fontStyle:"italic"}}>[{data.title} on {data.dateTime?.split("|")[0]?.trim()}]</div>
-              <div className="page-number-display" style={{fontWeight:"bold", color:"#0000cc"}}>PAGE 1 OF 1</div>
+              <div className="page-number-display" style={{fontWeight:"bold", color:"#0000cc"}}>PAGE 1 OF {photos.length > 4 ? 4 : 3}</div>
             </div>
             {footerImg ? (
               <img src={footerImg} alt="footer" style={{width:"100%", display:"block", marginTop:"4px"}}/>
@@ -407,11 +409,12 @@
         const cell = value => escapeHtml(value || "");
         const num = value => Number(value || 0);
 
-        const pageFooter = page => `
+        const TOTAL_PAGES = photos.length > 4 ? 4 : 3;
+        const pageFooter = (page, total) => `
           <div class="pdf-footer">
             <div class="pdf-footer-meta">
               <div class="pdf-ref">${footerLabel}</div>
-              <div class="pdf-page-no">PAGE ${page} OF 3</div>
+              <div class="pdf-page-no">PAGE ${page} OF ${total || TOTAL_PAGES}</div>
             </div>
             ${footerImgData ? `<img class="pdf-footer-img" src="${img(footerImgData)}" alt="footer">` : ""}
           </div>
@@ -499,6 +502,16 @@
               <h2>IV. <span>ANNEXES</span></h2>
               <h3>A. PHOTOS <em>(must be action picture)</em></h3>
               <div class="photo-grid">${photoCells}</div>
+              ${photos.length > 4 ? `
+                <div class="photo-grid" style="page-break-before: always; margin-top: 10mm;">
+                  ${[...Array(4)].map((_, i) => {
+                    const src = photos[i + 4];
+                    return src
+                      ? `<div class="photo-slot"><img src="${img(src)}" alt="Photo ${i + 5}"></div>`
+                      : `<div class="photo-slot empty"></div>`;
+                  }).join("")}
+                </div>
+              ` : ""}
 
               <table class="signature-table">
                 <tbody>
@@ -518,7 +531,7 @@
               </table>
               <div class="copy-furnish">Copy furnish: eLGU Project Management Team</div>
             </main>
-            ${pageFooter(3)}
+            ${pageFooter(TOTAL_PAGES)}
           </section>
         `;
       };
@@ -822,6 +835,232 @@
         });
       };
 
+      const handleExportDocx = () => {
+        if (!reportData) return;
+        const data = reportData;
+        const b = data.beneficiaries || {};
+        const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
+        const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+        const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
+        const benFemale = (b.ngas?.female||0)+(b.lgus?.female||0)+(b.sucs?.female||0)+(b.others?.female||0);
+        const totalMale = facilitatorMale + benMale;
+        const totalFemale = facilitatorFemale + benFemale;
+        const cell = v => String(v || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+        const num = v => Number(v || 0);
+
+        const facilitatorRows = data.facilitators.map(f =>
+          `<tr><td>${cell(f.name)}</td><td>${cell(f.office)}</td><td style="text-align:center">${cell(f.gender)}</td></tr>`
+        ).join("");
+
+        const photoRows = [];
+        for (let i = 0; i < photos.length; i += 2) {
+          const left = photos[i] ? `<img src="${photos[i]}" style="width:100%;height:120px;object-fit:cover">` : "";
+          const right = photos[i+1] ? `<img src="${photos[i+1]}" style="width:100%;height:120px;object-fit:cover">` : "";
+          photoRows.push(`<tr><td style="width:50%;padding:2px;border:1px solid #0000cc">${left}</td><td style="width:50%;padding:2px;border:1px solid #0000cc">${right}</td></tr>`);
+        }
+        const photoTable = photoRows.length ? `<table style="width:100%;border-collapse:collapse;border:2px solid #0000cc;margin:8px 0">${photoRows.join("")}</table>` : "<p><em>No photos uploaded</em></p>";
+
+        const rationaleParas = data.rationale.split("\n").filter(p=>p.trim()).map(p => `<p style="text-indent:36px;text-align:justify;margin:0 0 8px">${cell(p)}</p>`).join("");
+        const highlightsParas = data.highlights.split("\n").filter(p=>p.trim()).map(p => `<p style="text-indent:36px;text-align:justify;margin:0 0 8px">${cell(p)}</p>`).join("");
+
+        const html = `
+        <html xmlns:o="urn:schemas-microsoft-com:office:office"
+              xmlns:w="urn:schemas-microsoft-com:office:word"
+              xmlns="http://www.w3.org/TR/REC-html40">
+        <head><meta charset="utf-8">
+        <style>
+          @page { size: A4; margin: 20mm 25mm 25mm 25mm; }
+          @page Section1 { mso-header-margin: 10mm; mso-footer-margin: 15mm; mso-paper-source: 0; }
+          div.Section1 { page: Section1; }
+          body { font-family: 'Times New Roman', serif; font-size: 11pt; color: #000; }
+          p { margin: 0 0 6px; line-height: 1.8; }
+          table { border-collapse: collapse; width: 100%; }
+          .info-table th { background: #0000cc; color: #fff; padding: 4px 8px; border: 1px solid #0000cc; text-align: left; font-size: 10pt; }
+          .info-table td { padding: 4px 8px; border: 1px solid #0000cc; font-size: 10pt; }
+          .blue-th { background: #0000cc; color: #fff; padding: 4px 8px; border: 1px solid #0000cc; text-align: center; font-size: 10pt; }
+          .blue-td { padding: 4px 8px; border: 1px solid #0000cc; text-align: center; font-size: 10pt; }
+          .section-heading { font-weight: bold; font-size: 11pt; margin: 12pt 0 6pt; }
+          .sub-heading { font-weight: bold; font-style: italic; font-size: 10.5pt; margin: 8pt 0 4pt; }
+          .totals { text-align: right; font-weight: bold; font-size: 10pt; margin: 4pt 0 10pt; }
+          .page-break { page-break-before: always; }
+          .footer-line { font-size: 9pt; font-style: italic; color: #0000cc; margin-top: 6pt; }
+          .sig-table td { border: 1px solid #0000cc; padding: 10px; vertical-align: top; height: 80px; }
+          .sig-name { font-weight: bold; text-align: center; margin-top: 50px; text-transform: uppercase; }
+        </style></head><body>
+        <div class="Section1">
+
+        <table class="info-table" style="margin-bottom:12pt">
+          <tr><th style="width:30%">Title</th><td colspan="3">${cell(data.title)}</td></tr>
+          <tr><th>Date and Time</th><td colspan="3"><strong>${cell(data.dateTime)}</strong></td></tr>
+          <tr><th>Mode/Platform/Location</th><td>${cell(data.mode)}</td><th style="width:18%">Control No.</th><td>${cell(data.controlNo)}</td></tr>
+          <tr><th>Participants</th><td colspan="3" style="color:#0000cc;text-decoration:underline">Attached Attendance</td></tr>
+        </table>
+
+        <p class="section-heading">I.&nbsp;&nbsp;&nbsp;RATIONALE</p>
+        ${rationaleParas}
+
+        <p class="section-heading">II.&nbsp;&nbsp;ATTENDEES</p>
+        <p class="sub-heading">A. Facilitator (DICT)</p>
+        <table style="margin:0 0 4pt 18pt;width:calc(100% - 18pt)">
+          <tr><th class="blue-th">Name</th><th class="blue-th">Office</th><th class="blue-th" style="width:12%">Gender</th></tr>
+          ${facilitatorRows}
+        </table>
+        <p class="totals">Male: ${facilitatorMale} | Female: ${facilitatorFemale}</p>
+
+        <div class="page-break"></div>
+
+        <p class="sub-heading">B. NGAs / LGUs / SUCs and other Beneficiaries <em>(please see attached attendance sheet)</em></p>
+        <table style="margin:0 0 4pt 18pt;width:calc(100% - 18pt)">
+          <tr>
+            <th class="blue-th" colspan="2">NGAs</th><th class="blue-th" colspan="2">LGUs</th>
+            <th class="blue-th" colspan="2">SUCs</th><th class="blue-th" colspan="2">Others</th>
+          </tr>
+          <tr>
+            <td class="blue-td" style="font-weight:normal">Male</td><td class="blue-td" style="font-weight:normal">Female</td>
+            <td class="blue-td" style="font-weight:normal">Male</td><td class="blue-td" style="font-weight:normal">Female</td>
+            <td class="blue-td" style="font-weight:normal">Male</td><td class="blue-td" style="font-weight:normal">Female</td>
+            <td class="blue-td" style="font-weight:normal">Male</td><td class="blue-td" style="font-weight:normal">Female</td>
+          </tr>
+          <tr>
+            <td class="blue-td">${num(b.ngas?.male)||""}</td><td class="blue-td">${num(b.ngas?.female)||""}</td>
+            <td class="blue-td">${num(b.lgus?.male)||""}</td><td class="blue-td">${num(b.lgus?.female)||""}</td>
+            <td class="blue-td">${num(b.sucs?.male)||""}</td><td class="blue-td">${num(b.sucs?.female)||""}</td>
+            <td class="blue-td">${num(b.others?.male)||""}</td><td class="blue-td">${num(b.others?.female)||""}</td>
+          </tr>
+        </table>
+        <p class="totals">Male: ${benMale} | Female: ${benFemale}</p>
+
+        <p class="sub-heading">C. Consolidated participants</p>
+        <table style="margin:0 0 12pt 18pt;width:calc(100% - 18pt)">
+          <tr><td style="padding:4px 8px;border:1px solid #0000cc">Total number of male attendees</td><td style="padding:4px 8px;border:1px solid #0000cc;width:20%;text-align:center">${totalMale}</td></tr>
+          <tr><td style="padding:4px 8px;border:1px solid #0000cc">Total number of female attendees</td><td style="padding:4px 8px;border:1px solid #0000cc;text-align:center">${totalFemale}</td></tr>
+          <tr><td style="padding:4px 8px;border:1px solid #0000cc;background:#0000cc;color:#fff;font-weight:bold">Total number of attendees</td><td style="padding:4px 8px;border:1px solid #0000cc;background:#0000cc;color:#fff;font-weight:bold;text-align:center">${totalMale+totalFemale}</td></tr>
+        </table>
+
+        <p class="section-heading">III.&nbsp;HIGHLIGHTS OF DISCUSSION</p>
+        ${highlightsParas}
+        <p style="text-align:center;font-style:italic;font-size:9pt;margin:8pt 0">[${cell(data.title)} on ${cell(data.dateTime?.split("|")[0]?.trim())}]</p>
+
+        <div class="page-break"></div>
+
+        <p class="section-heading">IV.&nbsp;&nbsp;ANNEXES</p>
+        <p class="sub-heading">A. PHOTOS <em>(must be action picture)</em></p>
+        ${photoTable}
+
+        <table class="sig-table" style="margin-top:20pt;border-collapse:collapse">
+          <tr>
+            <td style="width:50%">
+              <strong>Prepared by:</strong>
+              <div class="sig-name">${cell(data.preparedBy?.name)}</div>
+              <div style="text-align:center;text-transform:uppercase;font-size:9.5pt">${cell(data.preparedBy?.position)}</div>
+            </td>
+            <td style="width:50%">
+              <strong>Conformed by:</strong>
+              <div class="sig-name">${cell(data.conformedBy?.name)}</div>
+              <div style="text-align:center;text-transform:uppercase;font-size:9.5pt">${cell(data.conformedBy?.position)}</div>
+            </td>
+          </tr>
+        </table>
+        <p class="footer-line">Copy furnish: eLGU Project Management Team</p>
+
+        </div></body></html>`;
+
+        try {
+          const blob = htmlDocx.generateFromHtml(html);
+          saveAs(blob, `AAR-${(data.title || "Report").replace(/[^a-zA-Z0-9]/g, "_")}.docx`);
+        } catch (e) {
+          console.error("DOCX export error:", e);
+          alert("DOCX export failed. Falling back to RTF.");
+          handleExportRtf();
+        }
+      };
+
+      const handleExportRtf = () => {
+        if (!reportData) return;
+        const data = reportData;
+        const b = data.beneficiaries || {};
+        const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
+        const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+        const benMale = (b.ngas?.male||0)+(b.lgus?.male||0)+(b.sucs?.male||0)+(b.others?.male||0);
+        const benFemale = (b.ngas?.female||0)+(b.lgus?.female||0)+(b.sucs?.female||0)+(b.others?.female||0);
+        const totalMale = facilitatorMale + benMale;
+        const totalFemale = facilitatorFemale + benFemale;
+        const esc = s => String(s||"").replace(/\\/g,"\\\\").replace(/\{/g,"\\{").replace(/\}/g,"\\}");
+        const bold = s => `{\\b ${esc(s)}}`;
+        const row = (a,b,c) => `\\intbl ${bold(a)}\\cell ${esc(b)}\\cell ${esc(c)}\\cell\\row`;
+
+        const facRows = data.facilitators.map(f => row(f.name, f.office, f.gender)).join("\n");
+
+        const rtf = `{\\rtf1\\ansi\\deff0
+{\\fonttbl{\\f0 Times New Roman;}{\\f1 Arial;}}
+{\\colortbl;\\red0\\green0\\blue204;}
+\\paperw11906\\paperh16838\\margl1418\\margr1418\\margt1418\\margb1418
+\\fs22
+
+{\\b\\fs24 Title:}\\tab ${esc(data.title)}\\par
+{\\b\\fs24 Date and Time:}\\tab ${esc(data.dateTime)}\\par
+{\\b\\fs24 Mode/Platform/Location:}\\tab ${esc(data.mode)}\\tab{\\b Control No.:}\\tab ${esc(data.controlNo)}\\par
+{\\b\\fs24 Participants:}\\tab {\\cf1\\ul Attached Attendance}\\par
+\\par
+
+{\\b\\fs24 I.\\tab RATIONALE}\\par
+${data.rationale.split("\\n").filter(p=>p.trim()).map(p=>`{\\fs22 ${esc(p)}}\\par`).join("")}
+\\par
+
+{\\b\\fs24 II.\\tab ATTENDEES}\\par
+{\\b\\i A. Facilitator (DICT)}\\par
+\\pard\\intbl\\itap1
+\\trowd\\trqc\\trpaddg60\\trpaddl60\\trpaddr60
+\\clbrdrt\\brdrs\\brdrw15\\brdrcf1
+\\clbrdrl\\brdrs\\brdrw15\\brdrcf1
+\\clbrdrb\\brdrs\\brdrw15\\brdrcf1
+\\clbrdrr\\brdrs\\brdrw15\\brdrcf1
+\\cellx3600\\cellx7200\\cellx10800
+{\\b Name}\\cell {\\b Office}\\cell {\\b Gender}\\cell\\row
+${facRows}
+\\pard\\par
+{\\b Male: ${facilitatorMale} | Female: ${facilitatorFemale}}\\par
+\\par
+
+{\\b\\i B. NGAs / LGUs / SUCs and other Beneficiaries (please see attached attendance sheet)}\\par
+Male(F:${b.ngas?.female||0}/M:${b.ngas?.male||0}) \\tab LGUs(F:${b.lgus?.female||0}/M:${b.lgus?.male||0}) \\tab SUCs(F:${b.sucs?.female||0}/M:${b.sucs?.male||0}) \\tab Others(F:${b.others?.female||0}/M:${b.others?.male||0})\\par
+{\\b Male: ${benMale} | Female: ${benFemale}}\\par
+\\par
+
+{\\b\\i C. Consolidated participants}\\par
+Total number of male attendees: ${totalMale}\\par
+Total number of female attendees: ${totalFemale}\\par
+{\\b Total number of attendees: ${totalMale+totalFemale}}\\par
+\\par
+
+{\\b\\fs24 III.\\tab HIGHLIGHTS OF DISCUSSION}\\par
+${data.highlights.split("\\n").filter(p=>p.trim()).map(p=>`{\\fs22 ${esc(p)}}\\par`).join("")}
+\\par
+
+{\\b\\fs24 IV.\\tab ANNEXES}\\par
+{\\b\\i A. PHOTOS (must be action picture)}\\par
+${photos.length ? "[Photos attached - " + photos.length + " image(s)]" : "[No photos uploaded]"}\\par
+\\par
+
+{\\b Prepared by:}\\par
+${esc(data.preparedBy?.name)}\\par
+${esc(data.preparedBy?.position)}\\par
+\\tab\\tab\\tab{\\b Conformed by:}\\par
+\\tab\\tab\\tab${esc(data.conformedBy?.name)}\\par
+\\tab\\tab\\tab${esc(data.conformedBy?.position)}\\par
+\\par
+{\\i\\cf1 Copy furnish: eLGU Project Management Team}\\par
+}`;
+
+        const blob = new Blob([rtf], { type: "text/rtf;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `AAR-${(data.title || "Report").replace(/[^a-zA-Z0-9]/g, "_")}.rtf`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
       const updateReportData = (field, value) => {
         setReportData(prev => {
           if (field.includes('.')) {
@@ -886,6 +1125,12 @@
                   </button>
                   <button onClick={handlePrint} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#ff6600", color:"#fff"}}>
                     Export PDF
+                  </button>
+                  <button onClick={handleExportDocx} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#2b579a", color:"#fff"}}>
+                    Export DOCX
+                  </button>
+                  <button onClick={handleExportRtf} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#6c3483", color:"#fff"}}>
+                    Export RTF
                   </button>
                 </>
               )}
