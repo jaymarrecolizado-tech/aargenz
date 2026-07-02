@@ -328,14 +328,14 @@
         setLoading(true);
 
         try {
-          const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          const res = await fetch("https://api.z.ai/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${CONFIG.GROQ_API_KEY}`
+              "Authorization": `Bearer ${CONFIG.ZAI_API_KEY}`
             },
             body: JSON.stringify({
-              model: "llama-3.3-70b-versatile",
+              model: "glm-4.7",
               max_tokens: 4000,
               messages: [
                 { role: "system", content: SYSTEM_PROMPT },
