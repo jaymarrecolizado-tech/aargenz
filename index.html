@@ -228,16 +228,15 @@
                     const chunk = photos.slice(i, i + 2);
                     const isLastOdd = i + 2 >= photos.length && chunk.length === 1;
                     rows.push(
-                      <div key={i} style={{display:"grid", gridTemplateColumns: isLastOdd ? "1fr" : "1fr 1fr", gap:"4px", border:"2px solid #0000cc", padding:"4px", marginTop: i > 0 ? "4px" : undefined}}>
+                      <div key={i} style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"4px", border:"2px solid #0000cc", padding:"4px", marginTop: i > 0 ? "4px" : undefined}}>
                         {chunk.map((p, j) => (
-                          <div key={i+j} style={{position:"relative", aspectRatio:"4/3", overflow:"hidden"}}>
+                          <div key={i+j} style={{position:"relative", aspectRatio:"4/3", overflow:"hidden", gridColumn: isLastOdd && j === 0 ? "1 / -1" : undefined, maxWidth: isLastOdd ? "50%" : undefined, margin: isLastOdd ? "0 auto" : undefined}}>
                             <img src={p} alt={`Photo ${i+j+1}`} style={{width:"100%", height:"100%", objectFit:"cover"}}/>
                             {onRemovePhoto && (
                               <button onClick={() => onRemovePhoto(i+j)} style={{position:"absolute", top:"4px", right:"4px", width:"22px", height:"22px", borderRadius:"50%", border:"none", background:"rgba(220,53,69,0.85)", color:"#fff", fontSize:"12px", fontWeight:"bold", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1}}>x</button>
                             )}
                           </div>
                         ))}
-                        {isLastOdd && <div style={{aspectRatio:"4/3"}}></div>}
                       </div>
                     );
                   }
@@ -518,9 +517,8 @@
                 const grids = [];
                 for (let i = 0; i < photos.length; i += 4) {
                   const chunk = photos.slice(i, i + 4);
-                  const isLast = i + 4 >= photos.length;
-                  const isOdd = chunk.length % 2 !== 0 && chunk.length > 1;
-                  grids.push(`<div class="photo-grid${isOdd ? ' single-col' : ''}"${i > 0 ? ' style="page-break-before: always; margin-top: 8mm;"' : ''}>
+                  const isOdd = chunk.length % 2 !== 0;
+                  grids.push(`<div class="photo-grid${isOdd ? ' odd-last' : ''}"${i > 0 ? ' style="page-break-before: always; margin-top: 8mm;"' : ''}>
                     ${chunk.map((src, j) => `<div class="photo-slot"><img src="${img(src)}" alt="Photo ${i + j + 1}"></div>`).join("")}
                   </div>`);
                 }
@@ -609,12 +607,12 @@
             padding-top: 13mm;
           }
           .continuation {
-            padding-top: 24mm;
+            padding-top: 20mm;
           }
           .pdf-header-img {
             display: block;
             width: 100%;
-            margin: 0 auto 8mm;
+            margin: 0 auto 6mm;
           }
           table {
             border-collapse: collapse;
@@ -726,8 +724,13 @@
             padding: 2mm;
             margin: 10mm 0 12mm;
           }
-          .photo-grid.single-col {
-            grid-template-columns: 1fr;
+          .photo-grid.odd-last {
+            grid-template-columns: 1fr 1fr;
+          }
+          .photo-grid.odd-last .photo-slot:last-child {
+            grid-column: 1 / -1;
+            max-width: 50%;
+            margin: 0 auto;
           }
           .photo-slot {
             height: 52mm;
@@ -744,17 +747,17 @@
           .signature-table {
             border: 1.5px solid #0000cc;
             font-size: 10pt;
-            margin-top: 14mm;
+            margin-top: 16mm;
           }
           .signature-table td {
             width: 50%;
-            height: 36mm;
+            height: 40mm;
             border: 1px solid #0000cc;
             padding: 5mm 7mm 3mm;
             vertical-align: top;
           }
           .signature-name {
-            margin-top: 16mm;
+            margin-top: 20mm;
             font-weight: 700;
             text-align: center;
             text-transform: uppercase;
@@ -767,7 +770,7 @@
             color: #333;
           }
           .copy-furnish {
-            margin-top: 5mm;
+            margin-top: 4mm;
             color: #0000cc;
             font-style: italic;
             font-size: 10pt;
