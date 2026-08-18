@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Synthetic AAR training-data generator ("teacher" script).
 //
-// Drives the live Groq model (llama-3.3-70b-versatile) through many simulated
+// Drives the live Groq model (openai/gpt-oss-120b) through many simulated
 // AAR conversations and saves (conversation -> final JSON) pairs as sharegpt
 // JSONL, ready for QLoRA fine-tuning (see fine-tune/train.py).
 //
@@ -17,9 +17,33 @@
 const fs = require("fs");
 const path = require("path");
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY || readKeyFromConfig();
+// Shared pool of Groq API keys (env GROQ_API_KEYS="k1,k2" or a single
+// GROQ_API_KEY; falls back to config.js). teacherReply() rotates to the next
+// key automatically when the active one is rate-limited (429) or rejected.
+const GROQ_KEYS = readGroqKeys();
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const TEACHER_MODEL = "llama-3.3-70b-versatile";
+const TEACHER_MODEL = "openai/gpt-oss-120b";
+
+let groqKeyCursor = 0; // index of the last key that worked
+
+function readGroqKeys() {
+  const fromEnv = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || "")
+    .split(",").map(k => k.trim()).filter(Boolean);
+  if (fromEnv.length) return fromEnv;
+  try {
+    const cfg = fs.readFileSync(path.join(__dirname, "..", "config.js"), "utf8");
+    const arr = cfg.match(/GROQ_API_KEYS\s*:\s*\[([^\]]*)\]/);
+    if (arr) {
+      const keys = (arr[1].match(/["'][^"']+["']/g) || [])
+        .map(k => k.replace(/["']/g, "").trim()).filter(Boolean);
+      if (keys.length) return keys;
+    }
+    const single = cfg.match(/GROQ_API_KEY\s*:\s*["']([^"']+)["']/);
+    return single ? [single[1]] : [];
+  } catch {
+    return [];
+  }
+}
 
 // Keep in sync with the system prompt embedded in index.html.
 const SYSTEM_PROMPT = extractSystemPrompt();
@@ -168,32 +192,47 @@ function buildAnswerer(t) {
 
 async function teacherReply(messages) {
   const maxRetries = 3;
+  let lastErr = null;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const idx = groqKeyCursor % GROQ_KEYS.length;
     try {
       const res = await fetch(GROQ_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${GROQ_API_KEY}`
+          "Authorization": `Bearer ${GROQ_KEYS[idx]}`
         },
         body: JSON.stringify({
           model: TEACHER_MODEL,
           max_tokens: 4000,
           temperature: 0.6,
-          response_format: { type: "json_object" },
+          // No response_format: the teacher asks questions in prose (ONE at a
+          // time) and only emits the final JSON at the end; isFinalJson()
+          // detects that turn. Forcing json_object breaks the question turns.
           messages
         })
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error("Groq error " + res.status + ": " + (errData.error?.message || JSON.stringify(errData)));
+        const msg = "Groq error " + res.status + ": " + (errData.error?.message || JSON.stringify(errData));
+        lastErr = new Error(msg);
+        // Rate limit / invalid key → rotate to the next key and retry.
+        if ([401, 403, 429].includes(res.status) && GROQ_KEYS.length > 1) {
+          console.warn(`  Groq key ${idx + 1}/${GROQ_KEYS.length} returned ${res.status}; trying next key`);
+          groqKeyCursor = (groqKeyCursor + 1) % GROQ_KEYS.length;
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        throw lastErr;
       }
+      groqKeyCursor = idx; // remember the key that worked
       const data = await res.json();
       const text = data.choices?.[0]?.message?.content || "";
       if (!text) throw new Error("Empty teacher response");
       return text;
     } catch (e) {
-      const retryable = /429|5\d\d|ECONN|fetch failed|network|timeout/i.test(e.message || "");
+      lastErr = e;
+      const retryable = /5\d\d|ECONN|fetch failed|network|timeout/i.test(e.message || "");
       if (attempt < maxRetries - 1 && retryable) {
         await new Promise(r => setTimeout(r, 1500 * Math.pow(2, attempt)));
         continue;
@@ -201,6 +240,7 @@ async function teacherReply(messages) {
       throw e;
     }
   }
+  throw lastErr || new Error("All Groq API keys failed");
 }
 
 function isFinalJson(text) {
@@ -252,8 +292,8 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  if (!GROQ_API_KEY) {
-    console.error("No GROQ_API_KEY. Set the env var or add it to config.js.");
+  if (!GROQ_KEYS.length) {
+    console.error("No GROQ_API_KEY / GROQ_API_KEYS. Set the env var or add it to config.js.");
     process.exit(1);
   }
   const { count, out, start, delayMs } = parseArgs(process.argv.slice(2));

@@ -8,6 +8,13 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="./config.js"></script>
+  <script>
+    // config.js is gitignored (it holds API keys) and may not exist on a
+    // fresh clone. Fall back to an empty config so the app still boots;
+    // keys are normally provided via the server-side proxy (api/chat.js /
+    // server.js env vars) instead.
+    if (typeof CONFIG === "undefined") { window.CONFIG = {}; }
+  </script>
 </head>
 <body>
   <div id="root"></div>
@@ -76,13 +83,26 @@
       conformedBy: { name: "", position: "" }
     };
 
+    const BEN_KEYS = ["ngas", "lgus", "sucs", "others"];
+    // Models sometimes capitalize the beneficiary category keys ("NGAs",
+    // "LGUs", "SUCs", "Others" — e.g. Groq's gpt-oss-120b). Look them up
+    // case-insensitively so counts are never silently zeroed.
+    const pickBenCat = (ben, key) => {
+      if (!ben || typeof ben !== "object") return undefined;
+      if (ben[key] !== undefined) return ben[key];
+      const match = Object.keys(ben).find(k => k.toLowerCase() === key);
+      return match !== undefined ? ben[match] : undefined;
+    };
+
     const normalizeReport = (raw) => {
       const d = { ...DEFAULT_REPORT, ...(raw || {}) };
-      d.beneficiaries = { ...DEFAULT_REPORT.beneficiaries, ...(d.beneficiaries || {}) };
-      for (const k of ["ngas", "lgus", "sucs", "others"]) {
+      const ben = d.beneficiaries || {};
+      d.beneficiaries = {};
+      for (const k of BEN_KEYS) {
+        const cat = pickBenCat(ben, k);
         d.beneficiaries[k] = {
-          male: Number(d.beneficiaries[k]?.male) || 0,
-          female: Number(d.beneficiaries[k]?.female) || 0
+          male: Number(cat?.male) || 0,
+          female: Number(cat?.female) || 0
         };
       }
       d.facilitators = Array.isArray(d.facilitators)
@@ -144,15 +164,15 @@
     // local model (Ollama / LM Studio / llama.cpp / vLLM) via the OpenAI-
     // compatible chat completions API. See LOCAL_AI_PLAN.md.
     //
-    //   AI_PROVIDER: "auto"  → local first, Groq fallback (default)
+    //   AI_PROVIDER: "groq"  → cloud only via Groq API (default)
     //                "local" → local only (errors if unreachable)
-    //                "groq"  → cloud only
+    //                "auto"  → local first, Groq fallback
     //   LOCAL_BASE_URL: base URL of the local OpenAI-compatible server
     //   LOCAL_MODEL: model name served by the local server
     // ---------------------------------------------------------------------------
 
     const AI_DEFAULTS = {
-      AI_PROVIDER: CONFIG?.AI_PROVIDER || "auto",
+      AI_PROVIDER: CONFIG?.AI_PROVIDER || "groq",
       LOCAL_BASE_URL: (CONFIG?.LOCAL_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, ""),
       LOCAL_MODEL: CONFIG?.LOCAL_MODEL || "qwen3:14b",
       LOCAL_TIMEOUT_MS: CONFIG?.LOCAL_TIMEOUT_MS || 120000
@@ -181,7 +201,11 @@
       model,
       max_tokens: 4000,
       temperature: 0.2, // lower temperature = more deterministic output
-      response_format: { type: "json_object" },
+      // NOTE: no response_format here on purpose. The assistant collects data
+      // ONE question at a time (see SYSTEM_PROMPT) and only emits the final
+      // JSON at the end; forcing json_object on every turn makes strict models
+      // (e.g. Groq's gpt-oss-120b) reject ordinary question turns. The final
+      // JSON is guaranteed by the system prompt + robust extractJson().
       messages,
       ...extra
     });
@@ -255,34 +279,70 @@
       return readCompletion(res, onToken);
     };
 
+    // Shared pool of Groq API keys (file:// mode). Accepts either an array
+    // (GROQ_API_KEYS: ["k1","k2"]) or a comma-separated string, and falls back
+    // to the single GROQ_API_KEY. When the active key hits its rate limit
+    // (HTTP 429) or is rejected (401/403), the request retries with the next
+    // key in the pool automatically.
+    const getGroqKeys = () => {
+      const cfg = CONFIG?.GROQ_API_KEYS;
+      let list = Array.isArray(cfg) ? cfg : (typeof cfg === "string" ? cfg.split(",") : []);
+      list = list.map(k => String(k).trim()).filter(Boolean);
+      if (!list.length && CONFIG?.GROQ_API_KEY) list = [String(CONFIG.GROQ_API_KEY).trim()];
+      return list;
+    };
+
+    // Index of the last key that worked; new requests start from it so a
+    // healthy key is preferred and exhausted keys are only hit when they're the
+    // only option.
+    let groqKeyCursor = 0;
+
     const groqStream = async (messages, onToken) => {
-      if (!CONFIG?.GROQ_API_KEY) {
-        throw new Error("No Groq API key available. Add config.js locally or deploy the api/chat proxy with GROQ_API_KEY set.");
+      const keys = getGroqKeys();
+      if (!keys.length) {
+        throw new Error("No Groq API key available. Add GROQ_API_KEY/GROQ_API_KEYS to config.js locally or deploy the api/chat proxy with GROQ_API_KEY set.");
       }
-      const maxRetries = 3;
       let lastErr;
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${CONFIG.GROQ_API_KEY}`
-            },
-            body: openAiBody(messages, "llama-3.3-70b-versatile", { stream: true })
-          }, 90000);
-          return await readCompletion(res, onToken);
-        } catch (e) {
-          lastErr = e;
-          const retryable = /429|5\d\d|ECONN|fetch failed|network|timeout|abort/i.test(e.message || "");
-          if (attempt < maxRetries - 1 && retryable) {
-            await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
-            continue;
+      const passes = 3; // up to 3 full rotations through the pool
+      for (let pass = 0; pass < passes; pass++) {
+        for (let i = 0; i < keys.length; i++) {
+          const idx = (groqKeyCursor + i) % keys.length;
+          try {
+            const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${keys[idx]}`
+              },
+              body: openAiBody(messages, "openai/gpt-oss-120b", { stream: true })
+            }, 90000);
+            if (!res.ok) {
+              const status = res.status;
+              const errText = await res.text().catch(() => "");
+              // Key-related failures (rate limit / invalid key) → next key.
+              if ([401, 403, 429].includes(status)) {
+                console.warn(`Groq key ${idx + 1}/${keys.length} returned ${status}; trying next key`);
+                lastErr = new Error("Groq " + status + ": " + (errText.slice(0, 300) || "key rejected"));
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+              }
+              throw new Error("Groq " + status + ": " + (errText.slice(0, 300) || "unknown error"));
+            }
+            groqKeyCursor = idx; // remember the key that worked
+            return await readCompletion(res, onToken);
+          } catch (e) {
+            lastErr = e;
+            const retryable = /5\d\d|ECONN|fetch failed|network|timeout|abort/i.test(e.message || "");
+            if (!retryable) throw e;
+            await new Promise(r => setTimeout(r, 500)); // transient — try next key
           }
-          throw e;
         }
+        // Finished a full pass without success: advance the cursor so the next
+        // pass starts from a different key, with backoff between passes.
+        groqKeyCursor = (groqKeyCursor + 1) % keys.length;
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, pass)));
       }
-      throw lastErr;
+      throw lastErr || new Error("All Groq API keys failed");
     };
 
     // Sends the conversation to the model, streaming tokens to onToken as they

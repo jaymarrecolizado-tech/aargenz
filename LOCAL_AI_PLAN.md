@@ -1,7 +1,7 @@
 # Local AI Model Integration Plan
 
-**Goal:** Let the AAR Generator swap its live cloud model (Llama 3.3 70B via
-the Groq API) for a local, self-hosted model — including models that can be
+**Goal:** Let the AAR Generator swap its live cloud model (openai/gpt-oss-120b
+via the Groq API) for a local, self-hosted model — including models that can be
 fine-tuned so their output matches the live model's format and quality.
 
 **Current integration (from `index.html`, `server.js`, `api/chat.js`):**
@@ -12,10 +12,13 @@ browser (chatCompletion in index.html)
   └─ 2. no proxy (file://)    → local model directly (Ollama etc.), then Groq fallback
 ```
 
-The request body is already OpenAI-format (`model`, `messages`, `max_tokens`,
-`response_format: {type:"json_object"}`). That is the key advantage: **every
-local runtime below speaks the same OpenAI-compatible `/v1/chat/completions`
-API**, so the swap is mostly a base-URL + model-name change.
+The request body is already OpenAI-format (`model`, `messages`, `max_tokens`).
+Note: `response_format: {type:"json_object"}` was dropped from all call sites
+(2026-08) because the live model (Groq `openai/gpt-oss-120b`) rejects JSON mode
+on question turns — it collects data one question at a time in prose and only
+emits the final JSON at the end. That is still the key advantage: **every local
+runtime below speaks the same OpenAI-compatible `/v1/chat/completions` API**,
+so the swap is mostly a base-URL + model-name change.
 
 ---
 
@@ -82,12 +85,13 @@ Server env vars mirror this: `AI_PROVIDER`, `LOCAL_BASE_URL`, `LOCAL_MODEL`.
 
 ### JSON-mode & determinism notes
 
-- **JSON mode:** Ollama, LM Studio, and vLLM all support
+- **JSON mode (optional, local only):** Ollama, LM Studio, and vLLM support
   `response_format: {type:"json_object"}` on their OpenAI-compatible endpoints
-  (Ollama maps it to `format:"json"`; schema form is also available). Keep
-  `json_object` + the existing `extractJson()` / `normalizeReport()` safety net.
-- **Temperature:** send `temperature: 0.2` for more deterministic output
-  (Groq currently uses the API default).
+  (Ollama maps it to `format:"json"`; schema form is also available). The app
+  currently omits it app-wide because gpt-oss-120b rejects it on question turns;
+  a local fine-tuned model that emits JSON reliably can re-enable it per-provider
+  if desired. The `extractJson()` / `normalizeReport()` safety net always stays.
+- **Temperature:** send `temperature: 0.2` for more deterministic output.
 - **CORS (client mode only):** the browser calling
   `http://localhost:11434` directly needs Ollama started with
   `OLLAMA_ORIGINS=*` (or `OLLAMA_ORIGINS=http://localhost:3000`). Running
@@ -118,10 +122,10 @@ model to *fine-tune* so output matches the live one.
 
 ### Path 0 — identical output, no training (highest fidelity)
 
-The live model is **Llama 3.3 70B**. Run the same weights locally:
+The live model is **openai/gpt-oss-120b** (Groq). Run the same weights locally:
 
-- **Llama 3.3 70B Instruct**, GGUF Q4_K_M (~40 GB) → needs a 48 GB GPU or
-  64 GB+ RAM. This is the *same model*, so output matches by definition — no
+- **OpenAI gpt-oss-120b** (Apache-2.0) → a 120B-class model, needs ~64 GB+
+  RAM/VRAM. This is the *same model*, so output matches by definition — no
   dataset, no training. Only do the fine-tuning paths below if this hardware
   isn't available.
 
@@ -220,7 +224,7 @@ served by Ollama, `AI_PROVIDER: "auto"` so Groq remains the safety net.
 
 | Risk | Mitigation |
 |---|---|
-| Fine-tuned 7–14B prose is weaker than 70B | Use 14B+ base; Path 0 (real Llama 3.3 70B) if hardware exists |
+| Fine-tuned 7–14B prose is weaker than 120B | Use 14B+ base; Path 0 (real gpt-oss-120b) if hardware exists |
 | Local model latency on first token | `LOCAL_TIMEOUT_MS` generous; streaming (SSE) now implemented; "auto" fallback to Groq → OpenRouter |
 | Conversations exceed small-model context | Keep `max_seq_len` ≥ 8192; shorten transcript history in training data |
 | Dataset too small → format drift | Synthetic teacher data is cheap to generate; iterate until eval passes |

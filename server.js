@@ -6,6 +6,7 @@
 //
 // Usage:
 //   GROQ_API_KEY=your_key AI_PROVIDER=local node server.js
+//   GROQ_API_KEYS=key1,key2 node server.js   (pool: auto-rotate on 429/401/403)
 //   (AI_PROVIDER: "groq" (default) | "local"; keys fall back to config.js)
 //
 // Then open http://localhost:3000
@@ -16,20 +17,37 @@ const path = require("path");
 const { URL } = require("url");
 
 const PORT = process.env.PORT || 3000;
-const GROQ_API_KEY = process.env.GROQ_API_KEY || readKeyFromConfig();
+// Shared pool of Groq API keys. Accepts GROQ_API_KEYS="k1,k2" (env), a single
+// GROQ_API_KEY (env), or both from config.js. When the active key hits its rate
+// limit (HTTP 429) or is rejected (401/403), the request is retried with the
+// next key in the pool.
+const GROQ_KEYS = readGroqKeys();
 const AI_PROVIDER = process.env.AI_PROVIDER || "groq"; // clients can override per-request via body.provider
 const LOCAL_BASE_URL = (process.env.LOCAL_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3:14b";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_MODEL = "openai/gpt-oss-120b";
 const UPSTREAM_TIMEOUT_MS = 180000;
 
-function readKeyFromConfig() {
+// Index of the last key that worked; new requests start from it so a healthy
+// key is preferred and exhausted keys are only hit when they're the only option.
+let groqKeyCursor = 0;
+
+function readGroqKeys() {
+  const fromEnv = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || "")
+    .split(",").map(k => k.trim()).filter(Boolean);
+  if (fromEnv.length) return fromEnv;
   try {
     const cfg = fs.readFileSync(path.join(__dirname, "config.js"), "utf8");
-    const match = cfg.match(/GROQ_API_KEY\s*:\s*["']([^"']+)["']/);
-    return match ? match[1] : "";
+    const arr = cfg.match(/GROQ_API_KEYS\s*:\s*\[([^\]]*)\]/);
+    if (arr) {
+      const keys = (arr[1].match(/["'][^"']+["']/g) || [])
+        .map(k => k.replace(/["']/g, "").trim()).filter(Boolean);
+      if (keys.length) return keys;
+    }
+    const single = cfg.match(/GROQ_API_KEY\s*:\s*["']([^"']+)["']/);
+    return single ? [single[1]] : [];
   } catch {
-    return "";
+    return [];
   }
 }
 
@@ -73,31 +91,34 @@ const server = http.createServer(async (req, res) => {
       model,
       max_tokens: (body && body.max_tokens) || 4000,
       temperature: 0.2,
-      response_format: { type: "json_object" },
+      // No response_format: the assistant asks questions in prose first and
+      // only emits the final JSON at the end (see SYSTEM_PROMPT in index.html).
       stream: wantsStream || undefined, // omitted when false
       messages
     });
 
-    let upstreamUrl, upstreamHeaders, upstreamBody;
+    let upstreamUrl, upstreamBody;
+    // One candidate per Groq key (or a single local candidate): the proxy tries
+    // each in turn and only moves on when a key is rate-limited / rejected.
+    let candidates;
     if (provider === "local") {
       if (!LOCAL_MODEL) {
         res.writeHead(500, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: { message: "LOCAL_MODEL is not set on the server" } }));
       }
       upstreamUrl = LOCAL_BASE_URL + "/chat/completions";
-      upstreamHeaders = { "Content-Type": "application/json" };
       upstreamBody = makeBody(LOCAL_MODEL);
+      candidates = [{ headers: { "Content-Type": "application/json" } }];
     } else {
-      if (!GROQ_API_KEY) {
+      if (!GROQ_KEYS.length) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: { message: "GROQ_API_KEY is not set (set it in the environment or config.js)" } }));
+        return res.end(JSON.stringify({ error: { message: "GROQ_API_KEY / GROQ_API_KEYS is not set (set it in the environment or config.js)" } }));
       }
       upstreamUrl = "https://api.groq.com/openai/v1/chat/completions";
-      upstreamHeaders = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROQ_API_KEY}`
-      };
       upstreamBody = makeBody(GROQ_MODEL);
+      candidates = GROQ_KEYS.map(key => ({
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` }
+      }));
     }
 
     // Abort the upstream request if the client disconnects; add a hard timeout
@@ -107,12 +128,51 @@ const server = http.createServer(async (req, res) => {
     const timer = wantsStream ? null : setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
 
     try {
-      const upRes = await fetch(upstreamUrl, {
-        method: "POST",
-        headers: upstreamHeaders,
-        body: upstreamBody,
-        signal: ctrl.signal
-      });
+      let upRes = null;
+      let lastErr = null;
+      let lastKeyErr = null; // { status, text } of the last rate-limited/rejected key
+      const start = groqKeyCursor % candidates.length;
+      let successIdx = -1;
+      let allKeyIssues = true;
+      for (let i = 0; i < candidates.length; i++) {
+        const idx = (start + i) % candidates.length;
+        try {
+          upRes = await fetch(upstreamUrl, {
+            method: "POST",
+            headers: candidates[idx].headers,
+            body: upstreamBody,
+            signal: ctrl.signal
+          });
+        } catch (e) {
+          lastErr = e;
+          if (e.name === "AbortError") throw e; // client disconnected / timeout
+          console.warn(`[proxy] request via candidate ${idx + 1}/${candidates.length} failed: ${e.message}`);
+          continue;
+        }
+        // Key-related failures (rate limit / invalid key) → try the next key.
+        const keyIssue = provider !== "local" && [401, 403, 429].includes(upRes.status);
+        if (!upRes.ok && keyIssue) {
+          const text = await upRes.text().catch(() => ""); // drain so the connection can be reused
+          lastKeyErr = { status: upRes.status, text };
+          console.warn(`[proxy] Groq key ${idx + 1}/${candidates.length} returned ${upRes.status}; trying next key`);
+          upRes = null;
+          continue;
+        }
+        allKeyIssues = false;
+        if (upRes.ok) successIdx = idx; // remember the key that worked
+        break;
+      }
+      // Every key was rejected / rate-limited — relay the last key's error.
+      if (!upRes && lastKeyErr) {
+        res.writeHead(lastKeyErr.status, { "Content-Type": "application/json" });
+        return res.end(lastKeyErr.text || JSON.stringify({ error: { message: "All Groq API keys failed (last: " + lastKeyErr.status + ")" } }));
+      }
+      if (!upRes) throw lastErr || new Error("No upstream candidates");
+      if (successIdx >= 0) {
+        groqKeyCursor = successIdx; // prefer the key that just worked
+      } else if (allKeyIssues && candidates.length > 1) {
+        groqKeyCursor = (groqKeyCursor + 1) % candidates.length; // all limited — start elsewhere next time
+      }
 
       if (wantsStream && upRes.body) {
         res.writeHead(upRes.status, {
