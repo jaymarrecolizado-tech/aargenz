@@ -1,0 +1,30 @@
+# Ollama Modelfile for the fine-tuned AAR model.
+#
+# 1. Copy the GGUF exported by fine-tune/train.py into this folder
+#    (e.g. qwen3-14b-aar-q4_k_m.gguf) and update FROM below.
+# 2. Create the model:
+#      ollama create aar-local -f fine-tune/Modelfile.example
+# 3. Point the app at it: set LOCAL_MODEL=aar-local in the header dropdown
+#    or in config.js / the server env.
+#
+# IMPORTANT: TEMPLATE must match the base model's chat template. Get the exact
+# template for your base model with:
+#   ollama show <base-model> --modelfile
+# The Qwen3 example below uses the ChatML template.
+
+FROM ./qwen3-14b-aar-q4_k_m.gguf
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{- end }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
+
+# Use the same system prompt as the app (index.html) so behavior matches.
+SYSTEM """You are an assistant helping fill out an Accomplishment Activity Report (AAR) for DICT (Department of Information and Communications Technology) Philippines. Collect information through a friendly conversation, ONE question at a time, then output ONLY a valid JSON object with title, dateTime, mode, controlNo, facilitators, beneficiaries, rationale, highlights, preparedBy, and conformedBy."""
+
+PARAMETER temperature 0.2
+PARAMETER num_ctx 8192
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
