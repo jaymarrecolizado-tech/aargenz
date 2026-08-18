@@ -24,6 +24,15 @@ const CONFIG = {
   // GROQ_API_KEY when set. Server mode also accepts GROQ_API_KEYS="k1,k2" as an
   // env var.
   GROQ_API_KEYS: ["YOUR_GROQ_API_KEY_1", "YOUR_GROQ_API_KEY_2"],
+  // xAI (Grok) keys - the automatic FALLBACK provider. When every Groq key is
+  // rate-limited (429) or rejected (401/403), the app automatically retries
+  // against xAI's OpenAI-compatible API (https://api.x.ai/v1). Same pool
+  // semantics as GROQ_API_KEYS. Server mode also accepts XAI_API_KEYS="k1,k2"
+  // as an env var.
+  XAI_API_KEY: "YOUR_XAI_API_KEY",
+  XAI_API_KEYS: ["YOUR_XAI_API_KEY_1", "YOUR_XAI_API_KEY_2"],
+  // xAI model to use for the fallback (default grok-4.6).
+  XAI_MODEL: "grok-4.6",
   OPENROUTER_API_KEY: "YOUR_OPENROUTER_API_KEY",
   OPENROUTER_MODEL: "meta-llama/llama-3.3-70b-versatile",
   AI_PROVIDER: "groq",

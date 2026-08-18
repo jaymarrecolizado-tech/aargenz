@@ -279,70 +279,103 @@
       return readCompletion(res, onToken);
     };
 
-    // Shared pool of Groq API keys (file:// mode). Accepts either an array
-    // (GROQ_API_KEYS: ["k1","k2"]) or a comma-separated string, and falls back
-    // to the single GROQ_API_KEY. When the active key hits its rate limit
+    // Shared key-pool parser (file:// mode). Accepts either an array
+    // (XXX_API_KEYS: ["k1","k2"]) or a comma-separated string, and falls back
+    // to the single XXX_API_KEY. When the active key hits its rate limit
     // (HTTP 429) or is rejected (401/403), the request retries with the next
     // key in the pool automatically.
-    const getGroqKeys = () => {
-      const cfg = CONFIG?.GROQ_API_KEYS;
-      let list = Array.isArray(cfg) ? cfg : (typeof cfg === "string" ? cfg.split(",") : []);
+    const parseKeys = (listCfg, singleCfg) => {
+      let list = Array.isArray(listCfg) ? listCfg : (typeof listCfg === "string" ? listCfg.split(",") : []);
       list = list.map(k => String(k).trim()).filter(Boolean);
-      if (!list.length && CONFIG?.GROQ_API_KEY) list = [String(CONFIG.GROQ_API_KEY).trim()];
+      if (!list.length && singleCfg) list = [String(singleCfg).trim()];
       return list;
     };
+    const getGroqKeys = () => parseKeys(CONFIG?.GROQ_API_KEYS, CONFIG?.GROQ_API_KEY);
+    // xAI (Grok) keys – the automatic fallback provider used when every Groq
+    // key is rate-limited or rejected.
+    const getXaiKeys = () => parseKeys(CONFIG?.XAI_API_KEYS, CONFIG?.XAI_API_KEY);
 
     // Index of the last key that worked; new requests start from it so a
     // healthy key is preferred and exhausted keys are only hit when they're the
     // only option.
-    let groqKeyCursor = 0;
+    const groqKeyCursor = { current: 0 };
+    const xaiKeyCursor = { current: 0 };
 
-    const groqStream = async (messages, onToken) => {
-      const keys = getGroqKeys();
-      if (!keys.length) {
-        throw new Error("No Groq API key available. Add GROQ_API_KEY/GROQ_API_KEYS to config.js locally or deploy the api/chat proxy with GROQ_API_KEY set.");
-      }
-      let lastErr;
+    // Tries every key in a provider pool (up to `passes` full rotations),
+    // streaming to onToken. Throws once the whole pool is exhausted; the error
+    // carries .keyExhausted = true when only key issues (429/401/403) were hit.
+    const poolStream = async ({ url, model, keys, cursor, label, messages, onToken }) => {
+      let lastErr = null;
+      let keyExhausted = true;
       const passes = 3; // up to 3 full rotations through the pool
       for (let pass = 0; pass < passes; pass++) {
         for (let i = 0; i < keys.length; i++) {
-          const idx = (groqKeyCursor + i) % keys.length;
+          const idx = (cursor.current + i) % keys.length;
           try {
-            const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+            const res = await fetchWithTimeout(url, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${keys[idx]}`
               },
-              body: openAiBody(messages, "openai/gpt-oss-120b", { stream: true })
+              body: openAiBody(messages, model, { stream: true })
             }, 90000);
             if (!res.ok) {
               const status = res.status;
               const errText = await res.text().catch(() => "");
               // Key-related failures (rate limit / invalid key) → next key.
               if ([401, 403, 429].includes(status)) {
-                console.warn(`Groq key ${idx + 1}/${keys.length} returned ${status}; trying next key`);
-                lastErr = new Error("Groq " + status + ": " + (errText.slice(0, 300) || "key rejected"));
+                console.warn(`${label} key ${idx + 1}/${keys.length} returned ${status}; trying next key`);
+                lastErr = new Error(`${label} ${status}: ${errText.slice(0, 300) || "key rejected"}`);
                 await new Promise(r => setTimeout(r, 500));
                 continue;
               }
-              throw new Error("Groq " + status + ": " + (errText.slice(0, 300) || "unknown error"));
+              keyExhausted = false;
+              throw new Error(`${label} ${status}: ${errText.slice(0, 300) || "unknown error"}`);
             }
-            groqKeyCursor = idx; // remember the key that worked
+            cursor.current = idx; // remember the key that worked
             return await readCompletion(res, onToken);
           } catch (e) {
+            if (e.keyExhausted) throw e; // already classified by a nested pool
             lastErr = e;
             const retryable = /5\d\d|ECONN|fetch failed|network|timeout|abort/i.test(e.message || "");
-            if (!retryable) throw e;
+            if (!retryable) { e.keyExhausted = false; throw e; }
             await new Promise(r => setTimeout(r, 500)); // transient — try next key
           }
         }
         // Finished a full pass without success: advance the cursor so the next
         // pass starts from a different key, with backoff between passes.
-        groqKeyCursor = (groqKeyCursor + 1) % keys.length;
+        cursor.current = (cursor.current + 1) % keys.length;
         await new Promise(r => setTimeout(r, 1000 * Math.pow(2, pass)));
       }
-      throw lastErr || new Error("All Groq API keys failed");
+      const err = lastErr || new Error(`All ${label} API keys failed`);
+      err.keyExhausted = keyExhausted;
+      throw err;
+    };
+
+    // Provider chain: Groq keys first, then xAI (Grok) keys as the automatic
+    // fallback when every Groq key is rate-limited / rejected.
+    const groqStream = async (messages, onToken) => {
+      const tiers = [
+        { url: "https://api.groq.com/openai/v1/chat/completions", model: "openai/gpt-oss-120b", keys: getGroqKeys(), cursor: groqKeyCursor, label: "Groq" },
+        { url: "https://api.x.ai/v1/chat/completions", model: CONFIG?.XAI_MODEL || "grok-4.6", keys: getXaiKeys(), cursor: xaiKeyCursor, label: "xAI" }
+      ].filter(t => t.keys.length);
+      if (!tiers.length) {
+        throw new Error("No Groq/xAI API key available. Add GROQ_API_KEY/GROQ_API_KEYS (or XAI_API_KEY/XAI_API_KEYS) to config.js locally or deploy the api/chat proxy with them set.");
+      }
+      let lastErr = null;
+      for (const tier of tiers) {
+        try {
+          return await poolStream({ ...tier, messages, onToken });
+        } catch (e) {
+          // Fall through to the next provider only when this pool was exhausted
+          // by key issues (rate limit / rejected key). Other errors surface.
+          if (!e.keyExhausted) throw e;
+          lastErr = e;
+          console.warn(`${tier.label} keys exhausted, trying next provider:`, e.message);
+        }
+      }
+      throw lastErr || new Error("All API providers failed");
     };
 
     // Sends the conversation to the model, streaming tokens to onToken as they
