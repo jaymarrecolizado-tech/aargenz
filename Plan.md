@@ -67,7 +67,7 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 | 5.1 Schema validation | Zod schema per template validates final LLM JSON before save/PDF; user-friendly error surface in chat when validation fails |
 | 5.2 Rate limiting | Per-user/per-IP token bucket on `/api/chat` (protects the Groq key pool) |
 | 5.3 Audit log | `audit_log` table: who generated/exported what, which provider/model answered |
-| 5.4 Deployment doc | Primary target: **Hostinger KVM 2 VPS** — Node app behind nginx (reverse proxy), MySQL on the same VPS, systemd service for `server.js`, HTTPS via Let's Encrypt; env var reference in README. Drop the Vercel/serverless path (`api/chat.js`) once the VPS is live |
+| 5.4 Deployment doc | ✅ Done — `DEPLOYMENT.md`: Node app behind nginx (reverse proxy, SSE-safe), MySQL on the same VPS, systemd unit for `server.js`, HTTPS via certbot, env-var reference, update + backup procedures. The Vercel/serverless path (`api/chat.cjs`) is legacy-only |
 
 **Deliverable:** safe for real office-wide use.
 
