@@ -1,5 +1,5 @@
 import { FOOTER_IMG } from "../lib/assets.js";
-import { normalizeReport } from "../lib/report.js";
+import { normalizeReport, countGenders } from "../lib/report.js";
 import { MAX_PHOTOS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
 
 // PDF + RTF export rendering, extracted verbatim from the original app.
@@ -30,8 +30,7 @@ export const buildPdfBlocks = (data, photos, headerImgData, template, photoLayou
   const persons = personIds(template);
   const hasPersons = persons.size > 0;
   const b = data.beneficiaries || {};
-  const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-  const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+  const { male: facilitatorMale, female: facilitatorFemale } = countGenders(data.facilitators);
   const sumCat = (g) => cats.reduce((s, c) => s + (Number(b[c.id]?.[g]) || 0), 0);
   const benMale = sumCat("male");
   const benFemale = sumCat("female");
@@ -162,38 +161,41 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
     .pdf-content { position: absolute; left: 19mm; right: 19mm; bottom: 22mm; }
     .pdf-content.page-one { top: 13mm; }
     .pdf-content.continuation { top: 24mm; }
+    /* Spacing system: .blk's padding-bottom (4mm) is the ONLY inter-block gap;
+       inner margins stay out of the way so the rhythm never doubles up.
+       Section headings add 4mm of their own above for hierarchy. */
     .blk { display: flow-root; padding-bottom: 4mm; }
-    .pdf-header-img { display: block; width: 100%; margin: 0 auto 9mm; }
+    .pdf-header-img { display: block; width: 100%; margin: 0 auto; }
     table { border-collapse: collapse; width: 100%; }
-    .info-table { margin-bottom: 11mm; border: 1.5px solid #0000cc; font-size: 10pt; }
+    .info-table { border: 1.5px solid #0000cc; font-size: 10pt; }
     .info-table th { width: 31%; text-align: left; background: #0000cc; color: #fff; padding: 3px 7px; border: 1px solid #0000cc; font-weight: 700; }
     .info-table td { padding: 3px 7px; border: 1px solid #0000cc; vertical-align: middle; }
     .info-table .linkish { color: #0000cc; text-decoration: underline; }
-    h2 { margin: 0 0 6mm; font-size: 11pt; font-weight: 700; }
+    h2 { margin: 0; padding-top: 4mm; font-size: 11pt; font-weight: 700; }
     h2 span { margin-left: 8mm; }
-    h3 { margin: 0 0 4mm 13mm; font-size: 10.5pt; font-style: italic; font-weight: 700; }
+    h3 { margin: 0 0 3mm 13mm; font-size: 10.5pt; font-style: italic; font-weight: 700; }
     h3 em { font-weight: 400; }
     .para { margin: 0; font-size: 10.5pt; line-height: 1.85; text-align: justify; }
-    .para p { margin: 0 0 4mm; text-indent: 11mm; }
+    .para p { margin: 0; text-indent: 11mm; }
     .para.caption p { text-align: center; font-style: italic; font-size: 9pt; text-indent: 0; }
-    .blue-table { margin: 0 0 2mm 18mm; width: calc(100% - 18mm); font-size: 10pt; }
+    .blue-table { margin: 0 0 0 18mm; width: calc(100% - 18mm); font-size: 10pt; }
     .blue-table th { background: #0000cc; color: #fff; border: 1px solid #0000cc; padding: 3px 6px; text-align: center; }
     .blue-table td { border: 1px solid #0000cc; padding: 3px 6px; }
     .center, .beneficiary-table td { text-align: center; }
     .beneficiary-table .subhead td { font-weight: 400; }
-    .totals-line { text-align: right; font-weight: 700; margin: 0 0 13mm; font-size: 10pt; }
-    .summary-table { margin: 0 0 15mm 18mm; width: calc(100% - 18mm); font-size: 10pt; }
+    .totals-line { text-align: right; font-weight: 700; margin: 2mm 0 0; font-size: 10pt; }
+    .summary-table { margin: 0 0 0 18mm; width: calc(100% - 18mm); font-size: 10pt; }
     .summary-table td { border: 1px solid #0000cc; padding: 3px 6px; }
     .summary-table td:last-child { width: 34%; text-align: center; }
     .summary-total td { background: #0000cc; color: #fff; font-weight: 700; text-align: center; }
-    .photo-grid { margin: 12mm 0 14mm; }
+    .photo-grid { margin: 0; }
     .photo-slot { overflow: hidden; background: #f5f5f5; }
     .photo-slot img { display: block; width: 100%; height: 100%; object-fit: cover; }
     .signature-table { border: 1px solid #0000cc; font-size: 10pt; }
     .signature-table td { width: 50%; height: 32mm; border: 1px solid #0000cc; padding: 5mm 7mm 3mm; vertical-align: top; }
     .signature-name { margin-top: 14mm; font-weight: 700; text-align: center; text-transform: uppercase; }
     .signature-name + div { text-align: center; text-transform: uppercase; font-size: 9.5pt; }
-    .copy-furnish { margin-top: 4mm; color: #0000cc; font-style: italic; font-size: 10pt; }
+    .copy-furnish { color: #0000cc; font-style: italic; font-size: 10pt; }
     .pdf-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 22mm; }
     .pdf-footer-meta { position: absolute; left: 19mm; right: 19mm; bottom: 10mm; min-height: 7mm; font-size: 8.5pt; color: #0000cc; }
     .pdf-ref { position: absolute; left: 0; bottom: 3mm; max-width: 112mm; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-style: italic; font-weight: 700; }
@@ -473,8 +475,7 @@ export const buildRtf = (data, photos, template) => {
   const cats = benField?.categories || [];
   const persons = personIds(template);
   const b = data.beneficiaries || {};
-  const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-  const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+  const { male: facilitatorMale, female: facilitatorFemale } = countGenders(data.facilitators);
   const sumCat = (g) => cats.reduce((s, c) => s + (Number(b[c.id]?.[g]) || 0), 0);
   const benMale = sumCat("male");
   const benFemale = sumCat("female");

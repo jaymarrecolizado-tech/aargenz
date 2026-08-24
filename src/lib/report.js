@@ -54,6 +54,21 @@ export const normalizeReport = (raw, template) => {
   return d;
 };
 
+// Counts facilitator genders, tolerating every spelling the model or a hand
+// edit produces ("M", "m", "Male", "FEMALE", " f "). Strict equality used to
+// silently zero the tallies whenever anything but a bare M/F was stored —
+// which read as "the count doesn't update" in the preview and exports.
+export const countGenders = (facilitators) => {
+  let male = 0;
+  let female = 0;
+  for (const f of facilitators || []) {
+    const g = String(f?.gender || "").trim().toLowerCase();
+    if (/^(m|male)\b/.test(g)) male++;
+    else if (/^(f|fem|female)\b/.test(g)) female++;
+  }
+  return { male, female };
+};
+
 // Extracts a JSON object from LLM output that may be fenced with markdown
 // code blocks or embedded in surrounding prose. Returns null when no valid
 // JSON object can be recovered.

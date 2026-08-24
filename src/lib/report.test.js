@@ -3,6 +3,7 @@ import {
   DEFAULT_REPORT,
   BEN_KEYS,
   normalizeReport,
+  countGenders,
   extractJson,
   extractProgress,
   isCompleteProgress,
@@ -11,6 +12,38 @@ import {
   validateRawLlmJson,
   pickBenCat
 } from "./report.js";
+
+describe("countGenders", () => {
+  it("counts bare M/F values", () => {
+    expect(countGenders([{ gender: "M" }, { gender: "M" }, { gender: "F" }]))
+      .toEqual({ male: 2, female: 1 });
+  });
+
+  it("tolerates full words, casing and stray spaces", () => {
+    expect(countGenders([
+      { gender: "Male" },
+      { gender: "female" },
+      { gender: " FEMALE " },
+      { gender: "m" },
+      { gender: "Fem" }
+    ])).toEqual({ male: 2, female: 3 });
+  });
+
+  it("ignores blanks, junk and missing fields", () => {
+    expect(countGenders([
+      { gender: "" },
+      { gender: "X" },
+      {},
+      { name: "no gender here" },
+      null
+    ])).toEqual({ male: 0, female: 0 });
+  });
+
+  it("returns zeros for a missing list", () => {
+    expect(countGenders(undefined)).toEqual({ male: 0, female: 0 });
+    expect(countGenders([])).toEqual({ male: 0, female: 0 });
+  });
+});
 
 describe("extractJson", () => {
   it("parses a plain JSON object", () => {

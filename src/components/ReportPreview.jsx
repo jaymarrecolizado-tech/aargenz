@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
+import { countGenders } from "../lib/report.js";
 
 // Photo slot with a remove (✕) button when onRemove is provided.
 function PhotoSlot({ src, index, onRemove }) {
@@ -71,8 +72,9 @@ export default function ReportPreview({ data, photos, onUpdate, onAddFacilitator
   const cats = benField?.categories || [];
   const personIds = new Set((template?.fields || []).filter(f => f.type === "person").map(f => f.id));
 
-  const facilitatorMale = data.facilitators.filter(f => f.gender?.toUpperCase() === "M").length;
-  const facilitatorFemale = data.facilitators.filter(f => f.gender?.toUpperCase() === "F").length;
+  // Tolerant tally (countGenders) — "Male"/"F"/" m " all count; strict M/F
+  // equality used to zero these whenever the spelling varied.
+  const { male: facilitatorMale, female: facilitatorFemale } = countGenders(data.facilitators);
 
   const b = data.beneficiaries;
   const sumCat = (g) => cats.reduce((s, c) => s + (Number(b?.[c.id]?.[g]) || 0), 0);
@@ -173,7 +175,21 @@ export default function ReportPreview({ data, photos, onUpdate, onAddFacilitator
               <tr key={i}>
                 <td style={{padding:"5px 10px", border:"1px solid #ccc"}}>{renderEditable(`facilitators.${i}.name`, f.name, `facilitators.${i}.name`)}</td>
                 <td style={{padding:"5px 10px", border:"1px solid #ccc"}}>{renderEditable(`facilitators.${i}.office`, f.office, `facilitators.${i}.office`)}</td>
-                <td style={{padding:"5px 10px", border:"1px solid #ccc", textAlign:"center"}}>{renderEditable(`facilitators.${i}.gender`, f.gender, `facilitators.${i}.gender`)}</td>
+                <td style={{padding:"4px 6px", border:"1px solid #ccc", textAlign:"center"}}>
+                  {onUpdate ? (
+                    /* Dropdown keeps the stored value M/F so tallies stay exact;
+                       countGenders still tolerates legacy free-text values. */
+                    <select
+                      value={["M", "F"].includes(String(f.gender || "").trim().toUpperCase()) ? String(f.gender).trim().toUpperCase() : ""}
+                      onChange={e => onUpdate(`facilitators.${i}.gender`, e.target.value)}
+                      style={{width:"100%", maxWidth:"56px", border:"1px solid #ccd5f0", borderRadius:"4px", fontSize:"12px", padding:"3px 2px", background:"#fff"}}
+                    >
+                      <option value="">—</option>
+                      <option value="M">M</option>
+                      <option value="F">F</option>
+                    </select>
+                  ) : f.gender}
+                </td>
                 {onRemoveFacilitator && (
                   <td style={{padding:"2px 4px", border:"1px solid #ccc", textAlign:"center"}}>
                     <button onClick={() => onRemoveFacilitator(i)} title="Remove facilitator" style={{border:"none", background:"transparent", color:"#cc0000", cursor:"pointer", fontWeight:"bold"}}>✕</button>
