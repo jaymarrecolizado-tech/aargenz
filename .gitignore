@@ -1,5 +1,9 @@
 config.js
 node_modules/
+dist/
 .env
 __pycache__/
 *.pyc
+# Scratch test artifacts from API smoke runs
+_*.json
+_*.log

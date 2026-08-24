@@ -1,4 +1,4 @@
-// Local development server for the AAR Generator.
+﻿// Local development server for the AAR Generator.
 // Serves the static files AND proxies /api/chat to either a local model
 // (Ollama / LM Studio / llama.cpp / vLLM) or Groq, so API keys stay server-side.
 // Streaming (SSE) responses are piped through as-is when the client requests
@@ -13,10 +13,16 @@
 //
 // Then open http://localhost:3000
 
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
-const { URL } = require("url");
+import http from "http";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
+import { fileURLToPath } from "url";
+import bcrypt from "bcryptjs";
+import { getPool } from "./db.js";
+import { normalizeReport, validateReportSchema, validateRawLlmJson } from "./src/lib/report.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 3000;
 // Shared pool of Groq API keys. Accepts GROQ_API_KEYS="k1,k2" (env), a single
@@ -44,6 +50,31 @@ const LOCAL_BASE_URL = (process.env.LOCAL_BASE_URL || "http://localhost:11434/v1
 const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3:14b";
 const UPSTREAM_TIMEOUT_MS = 180000;
 
+// Per-user/per-IP token bucket on /api/chat (Phase 5.2): protects the Groq
+// key pool from runaway usage. CHAT_RATE_MAX = burst size,
+// CHAT_RATE_REFILL_MS = ms between refunded tokens.
+const CHAT_RATE_MAX = Number(process.env.CHAT_RATE_MAX || 30);
+const CHAT_RATE_REFILL_MS = Number(process.env.CHAT_RATE_REFILL_MS || 2000);
+const chatBuckets = new Map();
+setInterval(() => { // drop stale buckets so the map doesn't grow forever
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [k, b] of chatBuckets) if (b.last < cutoff) chatBuckets.delete(k);
+}, 60 * 1000).unref();
+
+function allowChat(key) {
+  const now = Date.now();
+  let bucket = chatBuckets.get(key);
+  if (!bucket) {
+    bucket = { tokens: CHAT_RATE_MAX, last: now };
+    chatBuckets.set(key, bucket);
+  }
+  bucket.tokens = Math.min(CHAT_RATE_MAX, bucket.tokens + Math.floor((now - bucket.last) / CHAT_RATE_REFILL_MS));
+  bucket.last = now;
+  if (bucket.tokens <= 0) return false;
+  bucket.tokens--;
+  return true;
+}
+
 // Index of the last key that worked; new requests start from it so a healthy
 // key is preferred and exhausted keys are only hit when they're the only option.
 let groqKeyCursor = 0;
@@ -68,6 +99,102 @@ function readKeys(prefix) {
   }
 }
 
+// ---- Template config management (Phase 8.3) ------------------------------
+const VALID_FIELD_TYPES = ["text", "longform", "list", "beneficiaries", "person"];
+
+function validateTemplateConfig(tpl) {
+  if (!tpl || typeof tpl !== "object" || Array.isArray(tpl)) return ["Template must be an object"];
+  const errors = [];
+  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(tpl.id || "")) {
+    errors.push("id must be 2-64 chars: lowercase letters, digits and dashes");
+  }
+  if (!tpl.name || typeof tpl.name !== "string" || tpl.name.trim().length < 3) {
+    errors.push("name is required (at least 3 characters)");
+  }
+  const fields = tpl.fields;
+  if (!Array.isArray(fields) || !fields.length) {
+    errors.push("fields must be a non-empty array");
+  } else {
+    const ids = new Set();
+    fields.forEach((f, i) => {
+      if (!f || typeof f.id !== "string" || !/^[\w-]+$/.test(f.id)) {
+        errors.push(`fields[${i}].id is missing or invalid`);
+      } else if (ids.has(f.id)) {
+        errors.push(`fields[${i}].id "${f.id}" is duplicated`);
+      } else {
+        ids.add(f.id);
+      }
+      if (!f || !VALID_FIELD_TYPES.includes(f.type)) {
+        errors.push(`fields[${i}].type must be one of: ${VALID_FIELD_TYPES.join(", ")}`);
+      }
+      if (Array.isArray(f?.itemFields)) f.itemFields.forEach((sf, j) => {
+        if (!sf || !/^[\w-]+$/.test(sf.id || "")) errors.push(`fields[${i}].itemFields[${j}].id is invalid`);
+      });
+      if (Array.isArray(f?.categories)) f.categories.forEach((c, j) => {
+        if (!c || !/^[\w-]+$/.test(c.id || "")) errors.push(`fields[${i}].categories[${j}].id is invalid`);
+      });
+    });
+    // The first text field anchors raw-output validation — require one.
+    if (!fields.some(f => f.type === "text")) errors.push("At least one text field is required");
+  }
+  // Default branding (Phase 8.4): optional server-relative image paths written
+  // by the logo upload endpoint — never arbitrary URLs or traversal.
+  for (const key of ["headerLogo", "footerLogo"]) {
+    const v = tpl[key];
+    if (v != null && v !== "" && !/^(templates\/[\w-]+\/[\w-]+\.(png|jpg|jpeg|webp|svg))$/.test(String(v))) {
+      errors.push(`${key} must be a path under templates/<id>/ (png/jpg/webp/svg)`);
+    }
+  }
+  return [...new Set(errors)];
+}
+
+// ---- Per-template default logos (Phase 8.4) -------------------------------
+// Uploaded images are stored as files under templates/<id>/ and referenced
+// from template.json (headerLogo/footerLogo), so every user who picks the
+// template gets its branding without re-uploading.
+
+const LOGO_KINDS = { header: "header-logo", footer: "footer-logo" };
+const LOGO_MIME_EXT = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/svg+xml": ".svg"
+};
+const MAX_LOGO_BYTES = 2 * 1024 * 1024; // decoded size cap
+
+function decodeDataUrl(dataUrl) {
+  const m = /^data:([\w./+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(dataUrl || ""));
+  if (!m) return { error: "dataUrl must be a base64 data URL (data:image/...;base64,...)" };
+  const ext = LOGO_MIME_EXT[m[1].toLowerCase()];
+  if (!ext) return { error: `Unsupported image type ${m[1]} (use PNG, JPEG, WebP or SVG)` };
+  const buf = Buffer.from(m[2], "base64");
+  if (!buf.length) return { error: "Image is empty" };
+  if (buf.length > MAX_LOGO_BYTES) return { error: `Image is too large (max ${Math.round(MAX_LOGO_BYTES / 1024)} KB after decoding)` };
+  return { buf, ext };
+}
+
+function logoUrl(templateId, kind, ext) {
+  return `templates/${templateId}/${LOGO_KINDS[kind]}${ext}`;
+}
+
+function saveTemplateFile(tpl) {
+  const dir = path.join(__dirname, "templates", tpl.id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "template.json"), JSON.stringify(tpl, null, 2) + "\n");
+  const indexPath = path.join(__dirname, "templates", "index.json");
+  let index;
+  try {
+    index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  } catch {
+    index = { templates: [] };
+  }
+  if (!Array.isArray(index.templates)) index.templates = [];
+  if (!index.templates.some(entry => (typeof entry === "string" ? entry : entry?.id) === tpl.id)) {
+    index.templates.push(tpl.id);
+  }
+  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2) + "\n");
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript",
@@ -86,6 +213,484 @@ const MIME = {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
+  // ---- Request helpers (defined before any route so every route can use
+  // them regardless of file order — routes run top-down per request) --------
+  const SESSION_COOKIE = "aar_sid";
+  const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  const parseCookies = (req) => {
+    const out = {};
+    for (const part of (req.headers.cookie || "").split(";")) {
+      const i = part.indexOf("=");
+      if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    }
+    return out;
+  };
+
+  // Resolves the logged-in user from the session cookie, or null.
+  const getSessionUser = async (req) => {
+    const token = parseCookies(req)[SESSION_COOKIE];
+    if (!token) return null;
+    try {
+      const [rows] = await getPool().query(
+        `SELECT u.id, u.username, u.role FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token = ? AND s.expires_at > NOW()`,
+        [token]
+      );
+      return rows[0] || null;
+    } catch {
+      return null; // DB unavailable → treat as not logged in
+    }
+  };
+
+  const setSessionCookie = (res, token, maxAgeMs) => {
+    res.setHeader("Set-Cookie",
+      `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(maxAgeMs / 1000)}`);
+  };
+
+  const readBodyJson = async (req) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  function sendJson(status, obj) {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(obj));
+  }
+
+  // Admin-only guard for template management endpoints.
+  async function requireAdmin() {
+    const user = await getSessionUser(req);
+    if (!user) {
+      sendJson(401, { error: { message: "Login required" } });
+      return null;
+    }
+    if (user.role !== "admin") {
+      sendJson(403, { error: { message: "Admin access required" } });
+      return null;
+    }
+    return user;
+  };
+  if (url.pathname === "/api/templates") {
+    // Template registry (Phase 2): lists every template under templates/.
+    // Personnel lists managed by admins (Phase 8) live in the DB's templates
+    // table and override the file values; adding a new DICT project = drop a
+    // folder in templates/ and add it to templates/index.json.
+    try {
+      let dbPersonnel = {};
+      try {
+        const [rows] = await getPool().query("SELECT id, config FROM templates WHERE config IS NOT NULL");
+        for (const row of rows) {
+          const cfg = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
+          if (Array.isArray(cfg?.personnel)) dbPersonnel[row.id] = cfg.personnel;
+        }
+      } catch { /* DB unavailable — file personnel only */ }
+      const indexPath = path.join(__dirname, "templates", "index.json");
+      const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+      const templates = (index.templates || []).map(entry => {
+        const id = typeof entry === "string" ? entry : entry.id;
+        try {
+          const tpl = JSON.parse(fs.readFileSync(path.join(__dirname, "templates", id, "template.json"), "utf8"));
+          if (dbPersonnel[id]) tpl.personnel = dbPersonnel[id];
+          return tpl;
+        } catch {
+          return { id, name: entry?.name || id, error: "template.json missing or invalid" };
+        }
+      }).filter(Boolean);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(templates));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Failed to load template registry: " + e.message } }));
+    }
+  }
+
+  // Per-template config read/write (Phase 8.3, admin-only writes).
+  // GET returns the effective template (file + DB personnel override);
+  // PUT validates and persists a full template config written to disk.
+  const singleTplMatch = url.pathname.match(/^\/api\/templates\/([\w-]+)$/);
+  if (singleTplMatch) {
+    const templateId = singleTplMatch[1];
+    const tplPath = path.join(__dirname, "templates", templateId, "template.json");
+
+    if (req.method === "GET") {
+      const user = await getSessionUser(req);
+      if (!user) return sendJson(401, { error: { message: "Login required" } });
+      try {
+        let tpl;
+        try {
+          tpl = JSON.parse(fs.readFileSync(tplPath, "utf8"));
+        } catch {
+          return sendJson(404, { error: { message: "Template not found" } });
+        }
+        try {
+          const [rows] = await getPool().query("SELECT config FROM templates WHERE id = ?", [templateId]);
+          if (rows[0]) {
+            const cfg = typeof rows[0].config === "string" ? JSON.parse(rows[0].config) : rows[0].config;
+            if (Array.isArray(cfg?.personnel)) tpl.personnel = cfg.personnel;
+          }
+        } catch { /* DB unavailable — file only */ }
+        return sendJson(200, tpl);
+      } catch (e) {
+        return sendJson(500, { error: { message: e.message } });
+      }
+    }
+
+    if (req.method === "PUT") {
+      if (!(await requireAdmin())) return;
+      const body = await readBodyJson(req);
+      if (body && typeof body === "object") body.id = templateId;
+      const errors = validateTemplateConfig(body);
+      if (errors.length) return sendJson(422, { error: { message: "Invalid template", details: errors } });
+      try {
+        saveTemplateFile(body);
+        return sendJson(200, body);
+      } catch (e) {
+        console.error("[template save]", e.message);
+        return sendJson(500, { error: { message: "Failed to save template: " + e.message } });
+      }
+    }
+
+    return sendJson(405, { error: { message: "Method not allowed" } });
+  }
+
+  // Per-template personnel list: GET for any logged-in user, PUT admin-only
+  // (stored in the templates table so no redeploy is needed).
+  const personnelMatch = url.pathname.match(/^\/api\/templates\/([\w-]+)\/personnel$/);
+  if (personnelMatch) {
+    const templateId = personnelMatch[1];
+    const pool = getPool();
+    const readStored = async () => {
+      const [rows] = await pool.query("SELECT config FROM templates WHERE id = ?", [templateId]);
+      const cfg = rows[0] ? (typeof rows[0].config === "string" ? JSON.parse(rows[0].config) : rows[0].config) : null;
+      return Array.isArray(cfg?.personnel) ? cfg.personnel : null;
+    };
+    if (req.method === "GET") {
+      const user = await getSessionUser(req);
+      if (!user) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "Login required" } }));
+      }
+      try {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(await readStored() || []));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "Database error: " + e.message } }));
+      }
+    }
+    if (req.method === "PUT") {
+      if (!(await requireAdmin())) return;
+      const body = await readBodyJson(req);
+      if (!Array.isArray(body)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "Expected an array of {name, position}" } }));
+      }
+      const personnel = body
+        .map(p => ({ name: String(p?.name || "").trim(), position: String(p?.position || "").trim() }))
+        .filter(p => p.name);
+      try {
+        await pool.query(
+          `INSERT INTO templates (id, name, config) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE config = VALUES(config)`,
+          [templateId, templateId, JSON.stringify({ personnel })]
+        );
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(personnel));
+      } catch (e) {
+        console.error("[personnel]", e.message);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "Database error: " + e.message } }));
+      }
+    }
+    res.writeHead(405, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: { message: "Method not allowed" } }));
+  }
+
+  // Per-template default header/footer logo (Phase 8.4, admin-only).
+  // POST { kind, dataUrl } stores the image under templates/<id>/ and returns
+  // its URL for template.json's headerLogo/footerLogo; DELETE removes the file.
+  const logoMatch = url.pathname.match(/^\/api\/templates\/([\w-]+)\/logo$/);
+  if (logoMatch) {
+    if (!(await requireAdmin())) return;
+    const templateId = logoMatch[1];
+    if (!/^[\w-]+$/.test(templateId) || templateId.includes("..")) {
+      return sendJson(400, { error: { message: "Invalid template id" } });
+    }
+    const dir = path.join(__dirname, "templates", templateId);
+    if (req.method === "POST") {
+      const body = await readBodyJson(req);
+      const kind = String(body?.kind || "");
+      if (!LOGO_KINDS[kind]) {
+        return sendJson(400, { error: { message: 'kind must be "header" or "footer"' } });
+      }
+      const decoded = decodeDataUrl(body?.dataUrl);
+      if (decoded.error) return sendJson(422, { error: { message: decoded.error } });
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        // Replace any previous upload regardless of old extension.
+        for (const oldExt of Object.values(LOGO_MIME_EXT)) {
+          fs.rmSync(path.join(dir, LOGO_KINDS[kind] + oldExt), { force: true });
+        }
+        const file = LOGO_KINDS[kind] + decoded.ext;
+        fs.writeFileSync(path.join(dir, file), decoded.buf);
+        return sendJson(200, { url: logoUrl(templateId, kind, decoded.ext) });
+      } catch (e) {
+        console.error("[template logo]", e.message);
+        return sendJson(500, { error: { message: "Failed to save logo: " + e.message } });
+      }
+    }
+    if (req.method === "DELETE") {
+      const kind = url.searchParams.get("kind") || "";
+      if (!LOGO_KINDS[kind]) {
+        return sendJson(400, { error: { message: 'kind must be "header" or "footer"' } });
+      }
+      try {
+        for (const ext of Object.values(LOGO_MIME_EXT)) {
+          fs.rmSync(path.join(dir, LOGO_KINDS[kind] + ext), { force: true });
+        }
+        return sendJson(200, { ok: true });
+      } catch (e) {
+        return sendJson(500, { error: { message: "Failed to remove logo: " + e.message } });
+      }
+    }
+    return sendJson(405, { error: { message: "Method not allowed" } });
+  }
+
+  if (url.pathname === "/api/auth/register" || url.pathname === "/api/auth/login") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Method not allowed" } }));
+    }
+    const body = await readBodyJson(req);
+    if (!body || !body.username || !body.password) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "username and password are required" } }));
+    }
+    const username = String(body.username).trim();
+    if (username.length < 3 || username.length > 64) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Username must be 3-64 characters" } }));
+    }
+    if (String(body.password).length < 6) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Password must be at least 6 characters" } }));
+    }
+    try {
+      const pool = getPool();
+      let user;
+      if (url.pathname === "/api/auth/register") {
+        // The very first account bootstraps the admin; everyone after is an encoder.
+        const [existing] = await pool.query("SELECT id FROM users");
+        const role = existing.length === 0 ? "admin" : "encoder";
+        const id = crypto.randomUUID();
+        const hash = await bcrypt.hash(String(body.password), 10);
+        try {
+          await pool.query(
+            "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)",
+            [id, username, hash, role]
+          );
+        } catch (e) {
+          if (e.code === "ER_DUP_ENTRY") {
+            res.writeHead(409, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: { message: "Username is already taken" } }));
+          }
+          throw e;
+        }
+        user = { id, username, role };
+      } else {
+        const [rows] = await pool.query("SELECT * FROM users WHERE username = ?", [username]);
+        const found = rows[0];
+        if (!found || !(await bcrypt.compare(String(body.password), found.password_hash))) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: { message: "Invalid username or password" } }));
+        }
+        user = { id: found.id, username: found.username, role: found.role };
+      }
+      const token = crypto.randomBytes(32).toString("hex");
+      await pool.query(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
+        [token, user.id, Math.floor(SESSION_TTL_MS / 1000)]
+      );
+      setSessionCookie(res, token, SESSION_TTL_MS);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(user));
+    } catch (e) {
+      console.error("[auth]", e.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Database error: " + e.message } }));
+    }
+  }
+
+  if (url.pathname === "/api/auth/logout") {
+    const token = parseCookies(req)[SESSION_COOKIE];
+    if (token) {
+      try {
+        await getPool().query("DELETE FROM sessions WHERE token = ?", [token]);
+      } catch { /* best effort */ }
+    }
+    setSessionCookie(res, "", 0);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+
+  if (url.pathname === "/api/auth/me") {
+    const user = await getSessionUser(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(user || null));
+  }
+
+  // Reports API (Phase 3.2). Requires login — reports are owned by the
+  // authenticated user's id.
+  if (url.pathname === "/api/reports" || url.pathname.startsWith("/api/reports/")) {
+    const user = await getSessionUser(req);
+    if (!user) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Login required" } }));
+    }
+    const pool = getPool();
+    // XAMPP ships MariaDB, where JSON is an alias for LONGTEXT — values come
+    // back as strings there but as parsed objects on MySQL (Hostinger VPS).
+    // Normalize so clients always get real objects/arrays.
+    const normalizeReportRow = (row) => {
+      for (const key of ["conversation", "report", "photos"]) {
+        if (typeof row[key] === "string") {
+          try { row[key] = JSON.parse(row[key]); } catch { /* keep as-is */ }
+        }
+      }
+      return row;
+    };
+    const reportId = url.pathname.split("/")[3]; // /api/reports/:id
+    let body = {};
+    if (req.method === "POST" || req.method === "PUT") {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return sendJson(400, { error: { message: "Invalid JSON body" } });
+      }
+    }
+
+    // Normalizes + validates a final report payload before it is persisted
+    // (Phase 5.1). Returns { report } on success or { error } to reject.
+    const sanitizeReportPayload = (rawReport, templateId) => {
+      if (!rawReport || typeof rawReport !== "object" || !Object.keys(rawReport).length) {
+        return { report: rawReport ?? null }; // drafts without data are fine
+      }
+      let tplCfg = null;
+      try {
+        tplCfg = JSON.parse(fs.readFileSync(path.join(__dirname, "templates", String(templateId), "template.json"), "utf8"));
+      } catch { tplCfg = null; }
+      // Reject responses that aren't really a report before normalization
+      // repairs them into empty-but-valid-looking data.
+      const rawErrors = validateRawLlmJson(rawReport, tplCfg);
+      if (rawErrors.length) {
+        return { error: { message: "Report failed validation", details: rawErrors } };
+      }
+      const normalized = normalizeReport(rawReport, tplCfg);
+      const errors = validateReportSchema(normalized, tplCfg);
+      if (errors.length) {
+        return { error: { message: "Report failed validation", details: errors } };
+      }
+      return { report: normalized };
+    };
+
+    try {
+      // List the logged-in user's reports (metadata only; conversation/report
+      // excluded). Admins can list everyone's with ?all=1.
+      if (req.method === "GET" && !reportId) {
+        const all = url.searchParams.get("all") === "1" && user.role === "admin";
+        const [rows] = await pool.query(
+          `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.status, r.created_at, r.updated_at
+           FROM reports r LEFT JOIN users u ON u.id = r.owner
+           ${all ? "" : "WHERE r.owner = ?"}
+           ORDER BY r.updated_at DESC`,
+          all ? [] : [user.id]
+        );
+        return sendJson(200, rows);
+      }
+
+      // Create a new report.
+      if (req.method === "POST") {
+        if (!body.templateId) {
+          return sendJson(400, { error: { message: "templateId is required" } });
+        }
+        const id = crypto.randomUUID();
+        const checked = sanitizeReportPayload(body.report, body.templateId);
+        if (checked.error) return sendJson(422, checked.error);
+        await pool.query(
+          "INSERT INTO reports (id, owner, template_id, title, status, conversation, report, photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            id,
+            user.id,
+            String(body.templateId),
+            body.title != null ? String(body.title) : null,
+            body.status === "final" ? "final" : "draft",
+            body.conversation != null ? JSON.stringify(body.conversation) : null,
+            checked.report != null ? JSON.stringify(checked.report) : null,
+            body.photos != null ? JSON.stringify(body.photos) : null
+          ]
+        );
+        return sendJson(201, { id });
+      }
+
+      if (reportId) {
+      // Non-admins may only touch their own reports.
+      const canTouch = (row) => user.role === "admin" || row.owner === user.id;
+
+      // Fetch one report (full row).
+      if (req.method === "GET" && reportId) {
+        const [rows] = await pool.query("SELECT * FROM reports WHERE id = ?", [reportId]);
+        if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+        if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+        return sendJson(200, normalizeReportRow(rows[0]));
+      }
+      // Update mutable fields.
+      if (req.method === "PUT" && reportId) {
+        const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
+        if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+        if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+        const sets = [];
+        const params = [];
+        if ("title" in body) { sets.push("title = ?"); params.push(body.title != null ? String(body.title) : null); }
+        if ("status" in body) { sets.push("status = ?"); params.push(body.status === "final" ? "final" : "draft"); }
+        if ("conversation" in body) { sets.push("conversation = ?"); params.push(body.conversation != null ? JSON.stringify(body.conversation) : null); }
+        if ("report" in body) {
+          const tplId = body.templateId || (await pool.query("SELECT template_id FROM reports WHERE id = ?", [reportId]))[0][0]?.template_id;
+          const checked = sanitizeReportPayload(body.report, tplId);
+          if (checked.error) return sendJson(422, checked.error);
+          sets.push("report = ?");
+          params.push(checked.report != null ? JSON.stringify(checked.report) : null);
+        }
+        if ("photos" in body) { sets.push("photos = ?"); params.push(body.photos != null ? JSON.stringify(body.photos) : null); }
+          if (!sets.length) return sendJson(400, { error: { message: "Nothing to update" } });
+          params.push(reportId);
+          const [result] = await pool.query(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, params);
+          return sendJson(200, { ok: true });
+        }
+        if (req.method === "DELETE" && reportId) {
+          const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
+          if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+          if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+          await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
+          return sendJson(200, { ok: true });
+        }
+      }
+
+      return sendJson(405, { error: { message: "Method not allowed" } });
+    } catch (e) {
+      console.error("[reports]", e.message);
+      return sendJson(500, { error: { message: "Database error: " + e.message } });
+    }
+  }
+
   if (url.pathname === "/api/chat") {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
@@ -99,6 +704,13 @@ const server = http.createServer(async (req, res) => {
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Invalid JSON body" } }));
+    }
+
+    const chatUser = await getSessionUser(req);
+    const bucketKey = chatUser ? `u:${chatUser.id}` : `ip:${req.socket.remoteAddress}`;
+    if (!allowChat(bucketKey)) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Too many requests — please wait a moment before trying again" } }));
     }
 
     const provider = (body && body.provider) || AI_PROVIDER;
@@ -244,13 +856,40 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // Static files
-  let filePath = path.join(__dirname, url.pathname === "/" ? "index.html" : url.pathname);
+  // Static files. Serves the Vite build output from dist/ when it exists,
+  // falling back to the project root (for config.js and other root assets).
+  const staticRoot = path.join(__dirname, "dist");
+  let filePath = path.join(
+    fs.existsSync(staticRoot) ? staticRoot : __dirname,
+    url.pathname === "/" ? "index.html" : url.pathname
+  );
   if (!filePath.startsWith(__dirname)) {
     res.writeHead(403);
     return res.end("Forbidden");
   }
   fs.readFile(filePath, (err, data) => {
+    if (err && fs.existsSync(staticRoot)) {
+      // Retry from the project root before giving up.
+      const rootPath = path.join(__dirname, url.pathname);
+      if (rootPath.startsWith(__dirname) && fs.existsSync(rootPath)) {
+        return fs.readFile(rootPath, (err2, data2) => {
+          if (err2) {
+            res.writeHead(404, { "Content-Type": "text/plain" });
+            return res.end("Not found");
+          }
+          res.writeHead(200, { "Content-Type": MIME[path.extname(rootPath).toLowerCase()] || "application/octet-stream" });
+          res.end(data2);
+        });
+      }
+      // SPA fallback: serve the built index.html for client-side routes.
+      const indexPath = path.join(staticRoot, "index.html");
+      if (!url.pathname.startsWith("/api") && fs.existsSync(indexPath)) {
+        return fs.readFile(indexPath, (err3, data3) => {
+          res.writeHead(200, { "Content-Type": MIME[".html"] });
+          res.end(data3);
+        });
+      }
+    }
     if (err) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       return res.end("Not found");
