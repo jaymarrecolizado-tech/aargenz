@@ -102,6 +102,7 @@ Claude artifacts; consistent personnel names across the office.
 | 8.2 Custom signatory fix | ✅ Done — PersonPicker always shows editable Name/Position fields below the dropdown; picking a list entry overwrites both, typing works at any time |
 | 8.3 Template builder UI | ✅ Done — `⚙️ Admin → Templates`: guided form (name, opening question, standard/custom questions, beneficiary categories) + advanced raw-JSON mode; server validates and writes `templates/<id>/template.json` + `index.json`; appears in everyone's Template Picker instantly |
 | 8.4 Default header/footer logos | ✅ Done — admins import a Header Logo and Footer Logo per template in the builder (`POST/DELETE /api/templates/:id/logo`, stored under `templates/<id>/`, referenced by `headerLogo`/`footerLogo` in template.json); everyone picking that template gets its branding automatically (per-session overrides still win); `aar-elgu` defaults to the DICT banner |
+| 8.5 Proper A4 pagination | ✅ Done — print-window engine rewritten: accurate block measurement (`flow-root`), section headings never orphaned at a page bottom, oversized tables and photo collages split across pages by row/slot with repeated headers + "(continued)" labels; nothing is clipped |
 
 ---
 

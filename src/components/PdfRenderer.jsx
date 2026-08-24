@@ -162,7 +162,7 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
     .pdf-content { position: absolute; left: 19mm; right: 19mm; bottom: 22mm; }
     .pdf-content.page-one { top: 13mm; }
     .pdf-content.continuation { top: 24mm; }
-    .blk { padding-bottom: 4mm; }
+    .blk { display: flow-root; padding-bottom: 4mm; }
     .pdf-header-img { display: block; width: 100%; margin: 0 auto 9mm; }
     table { border-collapse: collapse; width: 100%; }
     .info-table { margin-bottom: 11mm; border: 1.5px solid #0000cc; font-size: 10pt; }
@@ -212,54 +212,172 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
     "use strict";
     var __PAYLOAD__ = ${payload};
 
-    function run() {
-      var MM = 96 / 25.4;
-      var PAGE_H = 297 * MM;
-      var BOTTOM = 22 * MM;
-      var TOP_FIRST = 13 * MM;
-      var TOP_CONT = 24 * MM;
-      var container = document.getElementById("pdf-pages");
-      var pages = [];
-      var cur = null;
+    // A4 pagination engine. Each block either fits the current page, starts a
+    // fresh one, or — when taller than a whole page — splits across pages by
+    // flowing table rows or photo slots with repeated headers. Nothing is
+    // ever clipped: every chunk is measured before it is placed.
+    var MM = 96 / 25.4;
+    var PAGE_H = 297 * MM;
+    var BOTTOM = 22 * MM;
+    var TOP_FIRST = 13 * MM;
+    var TOP_CONT = 24 * MM;
+    var MIN_ORPHAN = 25 * MM; // a section heading needs at least this much content under it
+    var MIN_CHUNK = 18 * MM;  // don't start a split chunk in a thin leftover strip
 
-      function newPage(isFirst) {
-        var page = document.createElement("div");
-        page.className = "pdf-page";
-        if (isFirst) {
-          var pattern = document.createElement("div");
-          pattern.className = "top-pattern";
-          page.appendChild(pattern);
+    var container = null;
+    var pages = [];
+    var cur = null;
+
+    function newPage(isFirst) {
+      var page = document.createElement("div");
+      page.className = "pdf-page";
+      if (isFirst) {
+        var pattern = document.createElement("div");
+        pattern.className = "top-pattern";
+        page.appendChild(pattern);
+      }
+      var content = document.createElement("div");
+      content.className = "pdf-content" + (isFirst ? " page-one" : " continuation");
+      page.appendChild(content);
+      container.appendChild(page);
+      var top = isFirst ? TOP_FIRST : TOP_CONT;
+      cur = { content: content, used: 0, height: PAGE_H - top - BOTTOM };
+      pages.push(cur);
+    }
+
+    function measure(html) {
+      var probe = document.createElement("div");
+      probe.className = "blk";
+      probe.style.cssText = "position:absolute;left:-9999px;top:0;width:172mm;visibility:hidden;";
+      probe.innerHTML = html;
+      document.body.appendChild(probe);
+      var h = probe.offsetHeight;
+      document.body.removeChild(probe);
+      return h;
+    }
+
+    function append(html) {
+      var div = document.createElement("div");
+      div.className = "blk";
+      div.innerHTML = html;
+      cur.content.appendChild(div);
+      cur.used += div.offsetHeight;
+    }
+
+    // Largest count in [0..max] whose rendered chunk fits avail.
+    function fitCount(render, max, avail) {
+      var lo = 0, hi = max, best = 0;
+      while (lo <= hi) {
+        var mid = (lo + hi) >> 1;
+        if (measure(render(mid)) <= avail) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      return best;
+    }
+
+    // Splits an oversized block across pages. Returns false when the block
+    // contains nothing divisible (caller then places it whole on its own page).
+    function splitAcrossPages(html) {
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      var root = doc.body.firstElementChild;
+      if (!root) return false;
+      var heading = root.querySelector("h3");
+      var totals = root.querySelector(".totals-line");
+      var table = root.querySelector("table");
+      var grid = root.querySelector(".photo-grid");
+
+      var items, buildWith;
+      if (table && table.tBodies.length && table.tBodies[0].rows.length >= 2) {
+        items = Array.prototype.slice.call(table.tBodies[0].rows);
+        buildWith = function(chunk, part, isFinal) {
+          var c = root.cloneNode(false);
+          if (heading) {
+            var h = heading.cloneNode(true);
+            if (part > 0) h.appendChild(document.createTextNode(" (continued)"));
+            c.appendChild(h);
+          }
+          var t = table.cloneNode(false);
+          var th = table.querySelector("thead");
+          if (th) t.appendChild(th.cloneNode(true));
+          var tb = document.createElement("tbody");
+          for (var r = 0; r < chunk.length; r++) tb.appendChild(chunk[r]);
+          t.appendChild(tb);
+          c.appendChild(t);
+          if (totals && isFinal) c.appendChild(totals.cloneNode(true));
+          return c.outerHTML;
+        };
+      } else if (grid && grid.children.length >= 2) {
+        items = Array.prototype.slice.call(grid.children);
+        buildWith = function(chunk, part, isFinal) {
+          var c = root.cloneNode(false);
+          if (heading) {
+            var h = heading.cloneNode(true);
+            if (part > 0) h.appendChild(document.createTextNode(" (continued)"));
+            c.appendChild(h);
+          }
+          var g = grid.cloneNode(false);
+          for (var r = 0; r < chunk.length; r++) g.appendChild(chunk[r]);
+          c.appendChild(g);
+          return c.outerHTML;
+        };
+      } else {
+        return false;
+      }
+
+      var total = items.length;
+      var placed = 0;
+      var part = 0;
+      while (placed < total) {
+        var remaining = total - placed;
+        var justPaged = false;
+        if (part > 0 && cur.height - cur.used < MIN_CHUNK) {
+          newPage(false);
+          justPaged = true;
         }
-        var content = document.createElement("div");
-        content.className = "pdf-content" + (isFirst ? " page-one" : " continuation");
-        page.appendChild(content);
-        container.appendChild(page);
-        var top = isFirst ? TOP_FIRST : TOP_CONT;
-        cur = { content: content, used: 0, height: PAGE_H - top - BOTTOM };
-        pages.push(cur);
+        var p = part;
+        var renderN = function(n) {
+          return buildWith(items.slice(placed, placed + n), p, n === remaining);
+        };
+        var count = fitCount(renderN, remaining, cur.height - cur.used);
+        if (!count) {
+          if (justPaged || cur.used === 0) {
+            if (p === 0) return false; // even one item can't fit an empty page
+            count = 1;                 // force progress on a fresh page
+          } else {
+            newPage(false);
+            continue;
+          }
+        }
+        append(buildWith(items.slice(placed, placed + count), p, count === remaining));
+        placed += count;
+        part++;
       }
+      return true;
+    }
 
-      function measure(html) {
-        var probe = document.createElement("div");
-        probe.className = "blk";
-        probe.style.cssText = "position:absolute;left:-9999px;top:0;width:172mm;visibility:hidden;";
-        probe.innerHTML = html;
-        document.body.appendChild(probe);
-        var h = probe.offsetHeight;
-        document.body.removeChild(probe);
-        return h;
-      }
-
+    function run() {
+      container = document.getElementById("pdf-pages");
       newPage(true);
-      __PAYLOAD__.blocks.forEach(function(html) {
+      var blocks = __PAYLOAD__.blocks;
+      for (var bi = 0; bi < blocks.length; bi++) {
+        var html = blocks[bi];
         var h = measure(html);
-        if (cur.used + h > cur.height) newPage(false);
-        var div = document.createElement("div");
-        div.className = "blk";
-        div.innerHTML = html;
-        cur.content.appendChild(div);
-        cur.used += div.offsetHeight;
-      });
+
+        // Section headings must not be orphaned at the bottom of a page.
+        if (/^<h2/.test(html)) {
+          if (cur.used + h > cur.height) newPage(false);
+          else {
+            var withNext = h + (bi + 1 < blocks.length ? Math.min(measure(blocks[bi + 1]), MIN_ORPHAN) : 0);
+            if (cur.used + withNext > cur.height) newPage(false);
+          }
+          append(html);
+          continue;
+        }
+
+        if (cur.used + h <= cur.height) { append(html); continue; }
+        if (h <= cur.height) { newPage(false); append(html); continue; }
+        if (!splitAcrossPages(html)) { newPage(false); append(html); }
+      }
 
       pages.forEach(function(p, i) {
         var footer = document.createElement("div");
