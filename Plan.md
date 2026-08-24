@@ -6,11 +6,17 @@ and hardened API usage.
 **Deployment target:** Hostinger KVM 2 VPS (Node + nginx + MySQL).
 Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 
-**Current state (baseline):**
-- Single-page React app in `index.html` (1,362 lines, Babel-in-browser)
-- One hardcoded template (`AAR-template.pdf`) + one system prompt
-- State only in `localStorage`; no users, no DB, no tests
-- Node proxy (`server.js`, `api/chat.js`) with Groq/xAI key pools + local model support
+**Current state (updated 2026-08-24):**
+- Vite + React app in `src/`; Node server serves the built `dist/` **and** the API
+- Multi-template registry (`templates/<id>/template.json`) driving chat prompts,
+  preview, PDF and RTF export
+- MySQL persistence (users, sessions, reports, templates) with migrations;
+  session-cookie auth with `encoder`/`admin` roles
+- Groq key pool → xAI fallback proxy with streaming and per-user rate limiting
+- Admin panel: personnel lists, template builder, per-template default logos
+
+**Open items:** live verification of the logo endpoints (needs a dev-server
+restart), audit log (5.3), then Phase 6 polish after rollout feedback.
 
 ---
 
@@ -19,22 +25,22 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 
 | Task | Details |
 |---|---|
-| 1.1 Scaffold Vite + React project | Move app out of `index.html` into `src/`. Keep `server.js` as dev/static server or switch to Vite dev server + proxy |
-| 1.2 Extract components | Split into: `ChatPanel`, `ReportPreview`, `PdfRenderer`, `ProviderPicker`, `App`. Keep behavior identical (regression-check against current app) |
-| 1.3 Extract shared logic | `extractJson`, `normalizeReport`, `SYSTEM_PROMPT` → `src/lib/` so they can be reused by scripts and tests |
-| 1.4 Add test setup | Vitest + unit tests for `extractJson` / `normalizeReport` / schema validation (these also feed the eval harness) |
+| 1.1 Scaffold Vite + React project | ✅ Done — app lives in `src/`, built by Vite; `server.js` serves `dist/` (project root fallback in dev) |
+| 1.2 Extract components | ✅ Done — `ChatPanel`, `ReportPreview`, `PdfRenderer`, `ProviderPicker`, `TemplatePicker`, `LoginPanel`, `MyReports`, `AdminPanel`, `TemplateBuilder`, `App` |
+| 1.3 Extract shared logic | ✅ Done — `src/lib/`: report parsing/validation, templates, prompt generation, storage, images, presets |
+| 1.4 Add test setup | ✅ Done — Vitest; 45 tests over `report.js` and `templates.js` (`npm test`) |
 
-**Deliverable:** same app, modern build, zero behavior change, `npm run test` green.
+**Deliverable:** ✅ shipped.
 
 ## Phase 2 — Multi-template support (multi-project core)
 
 | Task | Details |
 |---|---|
-| 2.1 Template config format | `templates/<id>/template.json`: `{ id, name, pdfTemplate, fields[], systemPrompt, beneficiaries?: {...} }` — field list drives both chat collection order and PDF mapping |
-| 2.2 Template registry | `templates/index.json` lists available templates; loaded via `/api/templates` (server) so new projects need no client redeploy |
-| 2.3 Parameterize system prompt | Move `SYSTEM_PROMPT` from code into each template's config; prompt is generated from the field list |
-| 2.4 PDF renderer per template | Generalize the canvas/pdf render path to map template fields → PDF coordinates defined in `template.json` |
-| 2.5 Template picker UI | Header dropdown (next to provider picker); selected template persisted in localStorage and sent with each request |
+| 2.1 Template config format | ✅ Done — `templates/<id>/template.json`; field list drives chat collection order, JSON shape and rendering |
+| 2.2 Template registry | ✅ Done — `templates/index.json` served via `/api/templates`; client prefers server definitions |
+| 2.3 Parameterize system prompt | ✅ Done — `buildSystemPrompt(template)` generates it from the field list |
+| 2.4 PDF renderer per template | ✅ Done — template-driven HTML blocks paginated by the print-window engine (A4; see 8.5); RTF export too |
+| 2.5 Template picker UI | ✅ Done — header dropdown; choice persisted per browser |
 
 **Deliverable:** adding a new DICT project = drop a folder in `templates/`, no code change.
 
@@ -42,10 +48,10 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 
 | Task | Details |
 |---|---|
-| 3.1 Database | **MySQL** (`mysql2` driver, connection pool) via `db.js` — target host is the Hostinger KVM 2 VPS. Tables: `users`, `sessions`, `reports`, `templates` (metadata only). Schema managed with SQL migration files (`db/migrations/*.sql`) applied by a small `npm run migrate` script. Connection settings via env vars (`DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`) — XAMPP's MySQL works for local dev since the project already lives in `htdocs` |
-| 3.2 Reports API | REST endpoints under `/api/reports`: create, list (own reports), get, update, delete. Report row stores conversation JSON + normalized report JSON + template id. **Done** |
-| 3.3 Client sync | Autosave draft to server (in addition to localStorage fallback); "My Reports" list view with open/duplicate/delete. **Restored by decision 2026-08-23 — implement after Phase 4 so drafts are owned by real user ids** |
-| 3.4 Photo uploads | `POST /api/reports/:id/photos` → stored on disk (`data/uploads/`) and referenced from the report record |
+| 3.1 Database | ✅ Done — MySQL (`mysql2` pool) via `db.js`; tables `users`, `sessions`, `reports`, `templates`; SQL migrations in `db/migrations/` applied by `npm run migrate`; env-var config (`DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`) works on both XAMPP (dev) and the VPS |
+| 3.2 Reports API | ✅ Done — REST under `/api/reports`: create/list/get/update/delete with per-user ownership; row stores conversation + report + photos JSON |
+| 3.3 Client sync | ✅ Done — debounced autosave of the draft; 🗂️ My Reports view opens saved reports (admins see all with `?all=1`) |
+| 3.4 Photo uploads | ✅ Done differently by decision — photos are compressed client-side and embedded as data URLs on the report row (no separate upload endpoint/disk store needed at current sizes) |
 
 **Deliverable:** reports survive browser resets and are accessible from any machine.
 
@@ -53,10 +59,10 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 
 | Task | Details |
 |---|---|
-| 4.1 Auth backend | Session-cookie auth: register/login endpoints, bcrypt password hashes, secure httpOnly cookies. Optional: tie into existing DICT accounts/AD later |
-| 4.2 Roles | `encoder` (create/edit own reports), `admin` (manage users + templates, see all reports). No approver role yet (signature flow deferred) |
-| 4.3 Protect APIs | `/api/reports*` require auth; `/api/chat` rate-limited per user |
-| 4.4 Login UI | Simple login page; header shows current user + role |
+| 4.1 Auth backend | ✅ Done — session cookies (`aar_sid`, HttpOnly), bcrypt hashes, register/login/logout/me endpoints; first account bootstraps the admin |
+| 4.2 Roles | ✅ Done — `encoder` (own reports) / `admin` (templates, personnel, all reports) |
+| 4.3 Protect APIs | ✅ Done — `/api/reports*`, template writes and logo uploads require login/admin; `/api/chat` rate-limited per user/IP (see 5.2) |
+| 4.4 Login UI | ✅ Done — `LoginPanel`; header shows username + role |
 
 **Deliverable:** multiple users can use the app concurrently without seeing each other's drafts.
 
@@ -64,9 +70,9 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 
 | Task | Details |
 |---|---|
-| 5.1 Schema validation | Zod schema per template validates final LLM JSON before save/PDF; user-friendly error surface in chat when validation fails |
-| 5.2 Rate limiting | Per-user/per-IP token bucket on `/api/chat` (protects the Groq key pool) |
-| 5.3 Audit log | `audit_log` table: who generated/exported what, which provider/model answered |
+| 5.1 Schema validation | ✅ Done — `validateRawLlmJson` + `validateReportSchema` (template-driven, `schema.js`) gate chat results and every server save; failures surface as a friendly chat message |
+| 5.2 Rate limiting | ✅ Done — per-user/per-IP token bucket on `/api/chat` (`CHAT_RATE_MAX`, `CHAT_RATE_REFILL_MS`) |
+| 5.3 Audit log | ⬜ Open — `audit_log` table: who generated/exported what, which provider/model answered. **Next up** |
 | 5.4 Deployment doc | ✅ Done — `DEPLOYMENT.md`: Node app behind nginx (reverse proxy, SSE-safe), MySQL on the same VPS, systemd unit for `server.js`, HTTPS via certbot, env-var reference, update + backup procedures. The Vercel/serverless path (`api/chat.cjs`) is legacy-only |
 
 **Deliverable:** safe for real office-wide use.
@@ -85,14 +91,14 @@ the AI stops collecting data that users can pick faster themselves.
 
 | Task | Details |
 |---|---|
-| 7.1 Manual signatories | Person fields (`preparedBy`, `conformedBy`) marked `"manual": true` in `template.json`; excluded from chat collection AND from the JSON schema the model is shown → fewer prompt + output tokens |
-| 7.2 Personnel dropdowns | `template.json` gains `"personnel": [{ name, position }]`; Preview tab shows dropdowns (+ free-text fallback) for each manual person field |
-| 7.3 Progressive JSON | System prompt instructs the model to append a fenced ```json block with all fields confirmed *so far* after every reply; client extracts it, merges, and updates the preview live |
-| 7.4 Split view | Chat on the left, live preview on the right (toggleable); placeholder panel before any data arrives |
-| 7.5 Header/footer presets | Uploaded headers/footers are saved to a local gallery; a picker reuses them instead of re-uploading every report |
+| 7.1 Manual signatories | ✅ Done — person fields marked `"manual": true`; excluded from chat collection and the model's JSON schema |
+| 7.2 Personnel dropdowns | ✅ Done — Preview tab shows dropdowns (+ editable free text) for each manual person field |
+| 7.3 Progressive JSON | ✅ Done — cumulative ```json progress block after every reply; client merges it into the live preview |
+| 7.4 Split view | ✅ Done — chat + live preview side by side (🪟 toggle), placeholder panel before data arrives |
+| 7.5 Header/footer presets | ✅ Done — uploads land in a local gallery with re-pick dropdowns; superseded for defaults by 8.4 |
 
-**Deliverable:** fewer Q&A rounds and tokens per report; visible progress like
-Claude artifacts; consistent personnel names across the office.
+**Deliverable:** ✅ shipped — fewer Q&A rounds, visible live progress,
+consistent personnel names across the office.
 
 ## Phase 8 — Administration & template management (opened 2026-08-24)
 
@@ -123,3 +129,7 @@ Phases 2 and 3 could run in parallel after Phase 1.
 
 - **Signature / conformance workflow** — digital signing and approver routing
   (deferred by decision; `preparedBy`/`conformedBy` remain plain text fields)
+- **"Booking rules" in settings** — raised 2026-08-24; no such feature exists
+  in this app. Awaiting clarification: either it belongs to a different project,
+  or it's a new feature (e.g. scheduling activities with capacity/conflict
+  rules) that would be scoped here first.
