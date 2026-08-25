@@ -12,7 +12,7 @@ export default function AdminPanel({ templates, onPersonnelSaved }) {
       <div style={{background:"#fff", borderRadius:"12px", boxShadow:"0 4px 24px rgba(0,0,100,0.15)", padding:"24px"}}>
         <div style={{fontSize:"18px", fontWeight:"700", color:"#0011aa", marginBottom:"4px"}}>⚙️ Administration</div>
         <div style={{display:"flex", gap:"8px", margin:"12px 0 16px"}}>
-          {[["personnel","👥 Personnel"],["templates","🧩 Templates"]].map(([s, lbl]) => (
+          {[["personnel","👥 Personnel"],["templates","🧩 Templates"],["audit","📜 Audit Log"]].map(([s, lbl]) => (
             <button key={s} onClick={() => setSection(s)} style={{
               padding:"6px 16px", borderRadius:"18px", border:"none", cursor:"pointer",
               fontSize:"12px", fontWeight:"600", background: section === s ? "#0033cc" : "#e8ecfa",
@@ -23,6 +23,8 @@ export default function AdminPanel({ templates, onPersonnelSaved }) {
 
         {section === "personnel"
           ? <PersonnelEditor templates={templates} onSaved={onPersonnelSaved}/>
+          : section === "audit"
+          ? <AuditLogViewer/>
           : (
             <>
               {builderFor && (
@@ -157,6 +159,102 @@ function PersonnelEditor({ templates, onSaved }) {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Audit trail viewer (Phase 5.3): who logged in, saved, generated, exported —
+// and which AI provider/model answered each chat. Newest first.
+function AuditLogViewer() {
+  const [entries, setEntries] = useState(null);
+  const [error, setError] = useState("");
+  const [filter, setFilter] = useState("");
+
+  const load = () => {
+    setError("");
+    api.getAuditLog(300)
+      .then(res => setEntries(res.entries || []))
+      .catch(e => setError(e.message));
+  };
+
+  useEffect(load, []);
+
+  const fmtTime = (ts) => {
+    try {
+      return new Date(ts).toLocaleString(undefined, {
+        year: "numeric", month: "short", day: "numeric",
+        hour: "2-digit", minute: "2-digit"
+      });
+    } catch { return ts; }
+  };
+
+  // Action → badge colors, so the log reads at a glance.
+  const actionStyle = (action) => {
+    if (action?.startsWith("auth.")) return { background:"#e8f0fe", color:"#0033cc" };
+    if (action?.startsWith("export.") || action === "report.create") return { background:"#e6f4ea", color:"#137333" };
+    if (action?.startsWith("template.") || action?.startsWith("logo.")) return { background:"#fef7e0", color:"#994d00" };
+    if (action === "chat") return { background:"#f3e8fd", color:"#6633cc" };
+    return { background:"#eee", color:"#444" };
+  };
+
+  const visible = (entries || []).filter(e =>
+    !filter ||
+    String(e.username || "").toLowerCase().includes(filter.toLowerCase()) ||
+    String(e.action || "").toLowerCase().includes(filter.toLowerCase()) ||
+    String(e.detail || "").toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px"}}>
+        <div style={{fontSize:"13px", fontWeight:"600", color:"#333"}}>Recent activity</div>
+        <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter by user, action…" style={{
+          marginLeft:"auto", padding:"6px 10px", borderRadius:"8px", border:"1px solid #ccd5f0", fontSize:"12px", width:"200px"
+        }}/>
+        <button onClick={load} style={{
+          padding:"6px 14px", borderRadius:"20px", border:"none", cursor:"pointer",
+          fontSize:"12px", fontWeight:"600", background:"#e8f0fe", color:"#0033cc"
+        }}>↻ Refresh</button>
+      </div>
+      {error && <div style={{background:"#fdecea", color:"#b71c1c", borderRadius:"8px", padding:"8px 12px", fontSize:"12px", marginBottom:"12px"}}>{error}</div>}
+      {!entries && !error && <div style={{color:"#666", fontSize:"13px"}}>Loading…</div>}
+      {entries && (
+        visible.length === 0 ? (
+          <div style={{color:"#999", fontSize:"13px", padding:"16px 0"}}>No matching entries.</div>
+        ) : (
+          <div style={{maxHeight:"420px", overflowY:"auto", border:"1px solid #eef1fa", borderRadius:"8px"}}>
+            <table style={{width:"100%", borderCollapse:"collapse", fontSize:"12px"}}>
+              <thead>
+                <tr style={{position:"sticky", top:0, background:"#fff"}}>
+                  {["When", "User", "Action", "Detail"].map(h => (
+                    <th key={h} style={{textAlign:"left", color:"#667", padding:"8px 10px", borderBottom:"2px solid #eef1fa"}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map(e => (
+                  <tr key={e.id} style={{borderBottom:"1px solid #f4f6fc"}}>
+                    <td style={{padding:"6px 10px", whiteSpace:"nowrap", color:"#556"}}>{fmtTime(e.at)}</td>
+                    <td style={{padding:"6px 10px", fontWeight:"600", color:"#223"}}>{e.username || "—"}</td>
+                    <td style={{padding:"6px 10px"}}>
+                      <span style={{
+                        ...actionStyle(e.action),
+                        display:"inline-block", padding:"2px 8px", borderRadius:"10px", fontSize:"11px", fontWeight:"600"
+                      }}>{e.action}{e.provider ? ` · ${e.provider}` : ""}</span>
+                    </td>
+                    <td style={{padding:"6px 10px", color:"#556"}}>
+                      {e.detail || ""}{e.model ? ` (${e.model})` : ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+      <div style={{fontSize:"11px", color:"#999", marginTop:"14px"}}>
+        Shows the latest 300 events. Exports are recorded when a user clicks Export PDF / RTF in their browser; chats record the provider and model that answered.
       </div>
     </div>
   );

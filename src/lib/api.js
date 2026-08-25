@@ -40,5 +40,12 @@ export const api = {
   uploadTemplateLogo: (templateId, kind, dataUrl) =>
     req(`api/templates/${templateId}/logo`, { method: "POST", body: { kind, dataUrl } }),
   deleteTemplateLogo: (templateId, kind) =>
-    req(`api/templates/${templateId}/logo?kind=${kind}`, { method: "DELETE" })
+    req(`api/templates/${templateId}/logo?kind=${kind}`, { method: "DELETE" }),
+
+  // Audit trail (Phase 5.3): record a client-side event (fire-and-forget —
+  // an export must never fail because logging did) and read the log (admin).
+  auditEvent: (action, detail) => {
+    req("api/audit", { method: "POST", body: { action, detail } }).catch(() => {});
+  },
+  getAuditLog: (limit = 200) => req(`api/audit?limit=${limit}`)
 };

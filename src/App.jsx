@@ -416,10 +416,10 @@ export default function App() {
               <button onClick={() => fileRef.current?.click()} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff"}}>
                 📷 Upload Photos
               </button>
-              <button onClick={() => printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout })} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#ff6600", color:"#fff"}}>
+              <button onClick={() => { api.auditEvent("export.pdf"); printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout }); }} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#ff6600", color:"#fff"}}>
                 Export PDF
               </button>
-              <button onClick={() => exportRtf(reportData, photos, template)} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#7a5af8", color:"#fff"}}>
+              <button onClick={() => { api.auditEvent("export.rtf"); exportRtf(reportData, photos, template); }} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#7a5af8", color:"#fff"}}>
                 📄 Export RTF
               </button>
               <button onClick={handleDownloadDataset} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff"}} title="Download this report as a fine-tuning example (sharegpt JSONL)">

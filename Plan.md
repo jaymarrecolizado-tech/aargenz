@@ -13,10 +13,11 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 - MySQL persistence (users, sessions, reports, templates) with migrations;
   session-cookie auth with `encoder`/`admin` roles
 - Groq key pool → xAI fallback proxy with streaming and per-user rate limiting
-- Admin panel: personnel lists, template builder, per-template default logos
+- Admin panel: personnel lists, template builder, per-template default logos,
+  audit log viewer
 
-**Open items:** live verification of the logo endpoints (needs a dev-server
-restart), audit log (5.3), then Phase 6 polish after rollout feedback.
+**Open items:** live verification of the logo + audit endpoints (needs a
+dev-server restart), then Phase 6 polish after rollout feedback.
 
 ---
 
@@ -72,7 +73,7 @@ restart), audit log (5.3), then Phase 6 polish after rollout feedback.
 |---|---|
 | 5.1 Schema validation | ✅ Done — `validateRawLlmJson` + `validateReportSchema` (template-driven, `schema.js`) gate chat results and every server save; failures surface as a friendly chat message |
 | 5.2 Rate limiting | ✅ Done — per-user/per-IP token bucket on `/api/chat` (`CHAT_RATE_MAX`, `CHAT_RATE_REFILL_MS`) |
-| 5.3 Audit log | ⬜ Open — `audit_log` table: who generated/exported what, which provider/model answered. **Next up** |
+| 5.3 Audit log | ✅ Done — `audit_log` table (migration `0003`); best-effort writes for auth events, report create/update/delete, template/personnel/logo saves, exports (`export.pdf`/`export.rtf`, recorded client-side via `POST /api/audit`) and chats (provider + model that answered). Admin reads via `GET /api/audit`; 📜 Audit Log tab in the admin panel with filter + refresh |
 | 5.4 Deployment doc | ✅ Done — `DEPLOYMENT.md`: Node app behind nginx (reverse proxy, SSE-safe), MySQL on the same VPS, systemd unit for `server.js`, HTTPS via certbot, env-var reference, update + backup procedures. The Vercel/serverless path (`api/chat.cjs`) is legacy-only |
 
 **Deliverable:** safe for real office-wide use.

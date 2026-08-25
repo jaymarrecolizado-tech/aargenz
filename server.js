@@ -276,7 +276,58 @@ const server = http.createServer(async (req, res) => {
       return null;
     }
     return user;
-  };
+  }
+
+  // Audit trail (Phase 5.3): best-effort INSERT — logging must never break
+  // or slow down the request it describes.
+  async function writeAudit(user, action, { detail = null, provider = null, model = null } = {}) {
+    try {
+      await getPool().query(
+        "INSERT INTO audit_log (user_id, username, action, detail, provider, model) VALUES (?, ?, ?, ?, ?, ?)",
+        [user?.id || null, user?.username || null,
+         String(action).slice(0, 64),
+         detail != null ? String(detail).slice(0, 255) : null,
+         provider ? String(provider).slice(0, 32) : null,
+         model ? String(model).slice(0, 64) : null]
+      );
+    } catch (e) {
+      console.warn("[audit] insert failed:", e.message);
+    }
+  }
+
+  // Audit trail read/write (Phase 5.3). GET is admin-only (who did what);
+  // POST lets logged-in users record browser-side events (PDF/RTF exports
+  // happen entirely client-side) from a small action whitelist.
+  if (url.pathname === "/api/audit") {
+    if (req.method === "GET") {
+      const admin = await requireAdmin();
+      if (!admin) return;
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit"), 10) || 200, 1), 1000);
+      try {
+        const [rows] = await getPool().query(
+          "SELECT id, at, user_id, username, action, detail, provider, model FROM audit_log ORDER BY at DESC, id DESC LIMIT ?",
+          [limit]
+        );
+        return sendJson(200, { entries: rows });
+      } catch (e) {
+        return sendJson(500, { error: { message: "Database error: " + e.message } });
+      }
+    }
+    if (req.method === "POST") {
+      const user = await getSessionUser(req);
+      if (!user) return sendJson(401, { error: { message: "Login required" } });
+      const body = await readBodyJson(req);
+      const action = String(body?.action || "");
+      // Whitelist: only client-generated lifecycle events may be recorded.
+      if (!["export.pdf", "export.rtf", "report.preview"].includes(action)) {
+        return sendJson(400, { error: { message: "Unknown audit action" } });
+      }
+      await writeAudit(user, action, { detail: body?.detail != null ? body.detail : null });
+      return sendJson(200, { ok: true });
+    }
+    return sendJson(405, { error: { message: "Method not allowed" } });
+  }
+
   if (url.pathname === "/api/templates") {
     // Template registry (Phase 2): lists every template under templates/.
     // Personnel lists managed by admins (Phase 8) live in the DB's templates
@@ -343,13 +394,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "PUT") {
-      if (!(await requireAdmin())) return;
+      const admin = await requireAdmin();
+      if (!admin) return;
       const body = await readBodyJson(req);
       if (body && typeof body === "object") body.id = templateId;
       const errors = validateTemplateConfig(body);
       if (errors.length) return sendJson(422, { error: { message: "Invalid template", details: errors } });
       try {
         saveTemplateFile(body);
+        writeAudit(admin, "template.save", { detail: `${templateId} — ${body.name || ""}` });
         return sendJson(200, body);
       } catch (e) {
         console.error("[template save]", e.message);
@@ -386,7 +439,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (req.method === "PUT") {
-      if (!(await requireAdmin())) return;
+      const admin = await requireAdmin();
+      if (!admin) return;
       const body = await readBodyJson(req);
       if (!Array.isArray(body)) {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -401,6 +455,7 @@ const server = http.createServer(async (req, res) => {
            ON DUPLICATE KEY UPDATE config = VALUES(config)`,
           [templateId, templateId, JSON.stringify({ personnel })]
         );
+        writeAudit(admin, "personnel.save", { detail: `${templateId} (${personnel.length} people)` });
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(JSON.stringify(personnel));
       } catch (e) {
@@ -418,7 +473,8 @@ const server = http.createServer(async (req, res) => {
   // its URL for template.json's headerLogo/footerLogo; DELETE removes the file.
   const logoMatch = url.pathname.match(/^\/api\/templates\/([\w-]+)\/logo$/);
   if (logoMatch) {
-    if (!(await requireAdmin())) return;
+    const admin = await requireAdmin();
+    if (!admin) return;
     const templateId = logoMatch[1];
     if (!/^[\w-]+$/.test(templateId) || templateId.includes("..")) {
       return sendJson(400, { error: { message: "Invalid template id" } });
@@ -440,6 +496,7 @@ const server = http.createServer(async (req, res) => {
         }
         const file = LOGO_KINDS[kind] + decoded.ext;
         fs.writeFileSync(path.join(dir, file), decoded.buf);
+        writeAudit(admin, "logo.upload", { detail: `${templateId} ${kind}` });
         return sendJson(200, { url: logoUrl(templateId, kind, decoded.ext) });
       } catch (e) {
         console.error("[template logo]", e.message);
@@ -455,6 +512,7 @@ const server = http.createServer(async (req, res) => {
         for (const ext of Object.values(LOGO_MIME_EXT)) {
           fs.rmSync(path.join(dir, LOGO_KINDS[kind] + ext), { force: true });
         }
+        writeAudit(admin, "logo.delete", { detail: `${templateId} ${kind}` });
         return sendJson(200, { ok: true });
       } catch (e) {
         return sendJson(500, { error: { message: "Failed to remove logo: " + e.message } });
@@ -518,6 +576,7 @@ const server = http.createServer(async (req, res) => {
         "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
         [token, user.id, Math.floor(SESSION_TTL_MS / 1000)]
       );
+      await writeAudit(user, url.pathname.endsWith("/register") ? "auth.register" : "auth.login");
       setSessionCookie(res, token, SESSION_TTL_MS);
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(user));
@@ -530,11 +589,14 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/auth/logout") {
     const token = parseCookies(req)[SESSION_COOKIE];
+    let logoutUser = null;
     if (token) {
       try {
+        logoutUser = await getSessionUser(req);
         await getPool().query("DELETE FROM sessions WHERE token = ?", [token]);
       } catch { /* best effort */ }
     }
+    writeAudit(logoutUser, "auth.logout");
     setSessionCookie(res, "", 0);
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ ok: true }));
@@ -638,6 +700,7 @@ const server = http.createServer(async (req, res) => {
             body.photos != null ? JSON.stringify(body.photos) : null
           ]
         );
+        writeAudit(user, "report.create", { detail: `${id} — ${body.title || "untitled"} (${body.templateId})` });
         return sendJson(201, { id });
       }
 
@@ -673,6 +736,7 @@ const server = http.createServer(async (req, res) => {
           if (!sets.length) return sendJson(400, { error: { message: "Nothing to update" } });
           params.push(reportId);
           const [result] = await pool.query(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, params);
+          writeAudit(user, "report.update", { detail: reportId });
           return sendJson(200, { ok: true });
         }
         if (req.method === "DELETE" && reportId) {
@@ -680,6 +744,7 @@ const server = http.createServer(async (req, res) => {
           if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
           if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
           await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
+          writeAudit(user, "report.delete", { detail: reportId });
           return sendJson(200, { ok: true });
         }
       }
@@ -741,7 +806,8 @@ const server = http.createServer(async (req, res) => {
         url: LOCAL_BASE_URL + "/chat/completions",
         body: makeBody(LOCAL_MODEL),
         headers: { "Content-Type": "application/json" },
-        label: "local model"
+        label: "local model",
+        model: LOCAL_MODEL
       }];
     } else {
       if (!GROQ_KEYS.length && !XAI_KEYS.length) {
@@ -752,13 +818,15 @@ const server = http.createServer(async (req, res) => {
         url: "https://api.groq.com/openai/v1/chat/completions",
         body: makeBody(GROQ_MODEL),
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-        label: "Groq"
+        label: "Groq",
+        model: GROQ_MODEL
       }));
       xaiCandidates = XAI_KEYS.map(key => ({
         url: XAI_URL,
         body: makeBody(XAI_MODEL),
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-        label: "xAI"
+        label: "xAI",
+        model: XAI_MODEL
       }));
     }
 
@@ -770,6 +838,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
       let upRes = null;
+      let chosenCand = null; // the candidate that ultimately answered
       let lastErr = null;
       let lastKeyErr = null; // { status, text } of the last rate-limited/rejected key
       let allKeyIssues = true;
@@ -814,7 +883,10 @@ const server = http.createServer(async (req, res) => {
             continue;
           }
           allKeyIssues = false;
-          if (upRes.ok) phase.setCursor(idx); // remember the key that worked
+          if (upRes.ok) {
+            phase.setCursor(idx); // remember the key that worked
+            chosenCand = cand;
+          }
           break; // success, or a non-key error to relay as-is
         }
         // Move to the next provider only if this phase was fully exhausted
@@ -832,6 +904,13 @@ const server = http.createServer(async (req, res) => {
         return res.end(lastKeyErr.text || JSON.stringify({ error: { message: "All API keys failed (last: " + lastKeyErr.status + ")" } }));
       }
       if (!upRes) throw lastErr || new Error("No upstream candidates");
+
+      // Audit: which provider/model answered this chat (5.3). Best-effort.
+      writeAudit(chatUser, "chat", {
+        detail: provider,
+        provider: chosenCand ? chosenCand.label : null,
+        model: chosenCand ? chosenCand.model : null
+      });
 
       if (wantsStream && upRes.body) {
         res.writeHead(upRes.status, {
