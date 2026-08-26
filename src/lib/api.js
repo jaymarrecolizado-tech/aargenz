@@ -28,9 +28,29 @@ export const api = {
   updateReport: (id, patch) => req(`api/reports/${id}`, { method: "PUT", body: patch }),
   deleteReport: (id) => req(`api/reports/${id}`, { method: "DELETE" }),
 
+  // Reports list → CSV download (Phase 6). Returns the raw blob so the caller
+  // controls the filename; admins pass all=true to include everyone's reports.
+  exportReportsCsv: async (all) => {
+    const res = await fetch(`api/reports?format=csv${all ? "&all=1" : ""}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error?.message || `Export failed (${res.status})`);
+    }
+    return res.blob();
+  },
+
   getPersonnel: (templateId) => req(`api/templates/${templateId}/personnel`),
   savePersonnel: (templateId, personnel) =>
     req(`api/templates/${templateId}/personnel`, { method: "PUT", body: personnel }),
+
+  // User management (admin only)
+  listUsers: () => req("api/users"),
+  createUser: (username, password, role) =>
+    req("api/users", { method: "POST", body: { username, password, role } }),
+  setUserRole: (id, role) => req(`api/users/${id}`, { method: "PUT", body: { role } }),
+  resetUserPassword: (id, password) =>
+    req(`api/users/${id}/password`, { method: "PUT", body: { password } }),
+  deleteUser: (id) => req(`api/users/${id}`, { method: "DELETE" }),
 
   getTemplateConfig: (templateId) => req(`api/templates/${templateId}`),
   saveTemplate: (config) => req(`api/templates/${config.id}`, { method: "PUT", body: config }),

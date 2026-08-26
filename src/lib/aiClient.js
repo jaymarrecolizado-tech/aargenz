@@ -11,10 +11,19 @@
 const CONFIG = () => (typeof window !== "undefined" && window.CONFIG) || {};
 
 export const AI_DEFAULTS = {
-  get AI_PROVIDER() { return CONFIG()?.AI_PROVIDER || "groq"; },
+  // Auto is the default mode: local model first (when reachable), cloud
+  // fallback after. Override via config.js or localStorage overrides.
+  get AI_PROVIDER() { return CONFIG()?.AI_PROVIDER || "auto"; },
   get LOCAL_BASE_URL() { return (CONFIG()?.LOCAL_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, ""); },
   get LOCAL_MODEL() { return CONFIG()?.LOCAL_MODEL || "qwen3:14b"; },
-  get LOCAL_TIMEOUT_MS() { return CONFIG()?.LOCAL_TIMEOUT_MS || 120000; }
+  get LOCAL_TIMEOUT_MS() { return CONFIG()?.LOCAL_TIMEOUT_MS || 120000; },
+  // Phase 6: opt-in strict JSON output for fine-tuned LOCAL models that
+  // answer with a single JSON object. Never applied to cloud providers
+  // (Groq/xAI reject json_object on prose question turns).
+  get LOCAL_JSON_MODE() {
+    const v = CONFIG()?.LOCAL_JSON_MODE;
+    return v === true || v === "1" || v === "true";
+  }
 };
 
 export const loadAiOverrides = () => {
@@ -29,6 +38,7 @@ export const effectiveAiConfig = (overrides = {}) => ({
   LOCAL_BASE_URL: AI_DEFAULTS.LOCAL_BASE_URL,
   LOCAL_MODEL: AI_DEFAULTS.LOCAL_MODEL,
   LOCAL_TIMEOUT_MS: AI_DEFAULTS.LOCAL_TIMEOUT_MS,
+  LOCAL_JSON_MODE: AI_DEFAULTS.LOCAL_JSON_MODE,
   ...overrides
 });
 
@@ -235,7 +245,12 @@ export const streamChat = async (messages, onToken, overrides = {}) => {
     const proxyRes = await fetchWithTimeout("api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: openAiBody(messages, cfg.LOCAL_MODEL, { provider: cfg.AI_PROVIDER, stream: true, templateId: cfg.templateId })
+      body: openAiBody(messages, cfg.LOCAL_MODEL, {
+        provider: cfg.AI_PROVIDER,
+        stream: true,
+        templateId: cfg.templateId,
+        jsonMode: !!cfg.LOCAL_JSON_MODE // server applies response_format for local models only
+      })
     }, 180000);
     if (proxyRes.ok) return await readCompletion(proxyRes, onToken);
     const errText = await proxyRes.text().catch(() => "");
@@ -249,7 +264,11 @@ export const streamChat = async (messages, onToken, overrides = {}) => {
       const res = await fetchWithTimeout(cfg.LOCAL_BASE_URL + "/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: openAiBody(messages, cfg.LOCAL_MODEL, { stream: true })
+        body: openAiBody(messages, cfg.LOCAL_MODEL, {
+          stream: true,
+          // Phase 6: strict JSON mode is a local-only opt-in (fine-tuned models).
+          ...(cfg.LOCAL_JSON_MODE ? { response_format: { type: "json_object" } } : {})
+        })
       }, cfg.LOCAL_TIMEOUT_MS);
       return await readCompletion(res, onToken);
     } catch (e) {

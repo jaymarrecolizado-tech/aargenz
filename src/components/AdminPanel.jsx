@@ -1,28 +1,27 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 import TemplateBuilder from "./TemplateBuilder.jsx";
+import UserManagement from "./UserManagement.jsx";
 
-// Admin panel (Phase 8): personnel lists + template management.
-export default function AdminPanel({ templates, onPersonnelSaved }) {
+// Admin panel (Phase 8): personnel lists + template management + user accounts.
+export default function AdminPanel({ templates, onPersonnelSaved, user }) {
   const [section, setSection] = useState("personnel");
   const [builderFor, setBuilderFor] = useState(null); // template id or "new"
 
   return (
     <div style={{width:"100%", maxWidth:"760px"}}>
-      <div style={{background:"#fff", borderRadius:"12px", boxShadow:"0 4px 24px rgba(0,0,100,0.15)", padding:"24px"}}>
-        <div style={{fontSize:"18px", fontWeight:"700", color:"#0011aa", marginBottom:"4px"}}>⚙️ Administration</div>
+      <div className="panel" style={{padding:"24px"}}>
+        <div style={{fontSize:"17px", fontWeight:"700", color:"var(--text)", marginBottom:"4px"}}>Administration</div>
         <div style={{display:"flex", gap:"8px", margin:"12px 0 16px"}}>
-          {[["personnel","👥 Personnel"],["templates","🧩 Templates"],["audit","📜 Audit Log"]].map(([s, lbl]) => (
-            <button key={s} onClick={() => setSection(s)} style={{
-              padding:"6px 16px", borderRadius:"18px", border:"none", cursor:"pointer",
-              fontSize:"12px", fontWeight:"600", background: section === s ? "#0033cc" : "#e8ecfa",
-              color: section === s ? "#fff" : "#445"
-            }}>{lbl}</button>
+          {[["users","Users"],["personnel","Personnel"],["templates","Templates"],["audit","Audit Log"]].map(([s, lbl]) => (
+            <button key={s} onClick={() => setSection(s)} className={"seg" + (section === s ? " active" : "")}>{lbl}</button>
           ))}
         </div>
 
         {section === "personnel"
           ? <PersonnelEditor templates={templates} onSaved={onPersonnelSaved}/>
+          : section === "users"
+          ? <UserManagement currentUser={user}/>
           : section === "audit"
           ? <AuditLogViewer/>
           : (
@@ -35,22 +34,19 @@ export default function AdminPanel({ templates, onPersonnelSaved }) {
                 />
               )}
               <div style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px"}}>
-                <div style={{fontSize:"13px", fontWeight:"600", color:"#333"}}>Existing templates</div>
-                <button onClick={() => setBuilderFor("new")} style={{
-                  marginLeft:"auto", padding:"6px 14px", borderRadius:"20px", border:"none", cursor:"pointer",
-                  fontSize:"12px", fontWeight:"600", background:"#0033cc", color:"#fff"
-                }}>＋ New template</button>
+                <div style={{fontSize:"13px", fontWeight:"600", color:"var(--text)"}}>Existing templates</div>
+                <button onClick={() => setBuilderFor("new")} className="mini-btn primary" style={{marginLeft:"auto"}}>＋ New template</button>
               </div>
               {(templates || []).map(t => (
-                <div key={t.id} style={{display:"flex", alignItems:"center", gap:"10px", padding:"8px 10px", borderBottom:"1px solid #eef1fa"}}>
+                <div key={t.id} style={{display:"flex", alignItems:"center", gap:"10px", padding:"8px 10px", borderBottom:"1px solid var(--border)"}}>
                   <div style={{flex:1}}>
                     <div style={{fontWeight:"600", fontSize:"13px"}}>{t.name}</div>
-                    <div style={{fontSize:"11px", color:"#888"}}>{t.id}{t.error ? ` — ⚠ ${t.error}` : ""}</div>
+                    <div style={{fontSize:"11px", color:"var(--muted)"}}>{t.id}{t.error ? ` — ⚠ ${t.error}` : ""}</div>
                   </div>
-                  <button onClick={() => setBuilderFor(t.id)} style={editBtn}>Edit</button>
+                  <button onClick={() => setBuilderFor(t.id)} className="mini-btn">Edit</button>
                 </div>
               ))}
-              <div style={{fontSize:"11px", color:"#999", marginTop:"14px"}}>
+              <div style={{fontSize:"11px", color:"var(--muted)", marginTop:"14px"}}>
                 Editing opens the template’s full JSON (advanced mode). New templates appear in everyone’s Template Picker right away.
               </div>
             </>
@@ -97,9 +93,9 @@ function PersonnelEditor({ templates, onSaved }) {
 
   return (
     <div style={{width:"100%", maxWidth:"720px"}}>
-      <div style={{background:"#fff", borderRadius:"12px", boxShadow:"0 4px 24px rgba(0,0,100,0.15)", padding:"24px"}}>
-        <div style={{fontSize:"18px", fontWeight:"700", color:"#0011aa", marginBottom:"4px"}}>⚙️ Administration</div>
-        <div style={{fontSize:"12px", color:"#666", marginBottom:"16px"}}>
+      <div className="panel" style={{padding:"24px"}}>
+        <div style={{fontSize:"17px", fontWeight:"700", color:"var(--text)", marginBottom:"4px"}}>Administration</div>
+        <div style={{fontSize:"12px", color:"var(--muted)", marginBottom:"16px"}}>
           Predefined personnel appear as dropdown choices for “Prepared by” / “Conformed by” on every report for this template.
         </div>
 
@@ -112,14 +108,14 @@ function PersonnelEditor({ templates, onSaved }) {
 
         {error && <div style={{background:"#fdecea", color:"#b71c1c", borderRadius:"8px", padding:"8px 12px", fontSize:"12px", marginBottom:"12px"}}>{error}</div>}
 
-        {rows === null && !error && <div style={{color:"#666", fontSize:"13px"}}>Loading…</div>}
+        {rows === null && !error && <div style={{color:"var(--muted)", fontSize:"13px"}}>Loading…</div>}
         {rows !== null && (
           <>
             <table style={{width:"100%", borderCollapse:"collapse", marginBottom:"12px"}}>
               <thead>
                 <tr>
                   {["Name", "Position", ""].map(h => (
-                    <th key={h} style={{textAlign:"left", fontSize:"11px", color:"#667", padding:"4px 8px", borderBottom:"2px solid #eef1fa"}}>{h}</th>
+                    <th key={h} style={{textAlign:"left", fontSize:"11px", color:"var(--muted)", padding:"4px 8px", borderBottom:"1px solid var(--border)"}}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -140,21 +136,15 @@ function PersonnelEditor({ templates, onSaved }) {
               </tbody>
             </table>
             <div style={{display:"flex", gap:"10px", alignItems:"center"}}>
-              <button onClick={() => setRows([...rows, { name: "", position: "" }])} style={{
-                padding:"7px 14px", borderRadius:"20px", border:"none", cursor:"pointer",
-                fontSize:"12px", fontWeight:"600", background:"#e8f0fe", color:"#0033cc"
-              }}>
+              <button onClick={() => setRows([...rows, { name: "", position: "" }])} className="mini-btn">
                 + Add person
               </button>
-              <button onClick={save} style={{
-                padding:"7px 20px", borderRadius:"20px", border:"none", cursor:"pointer",
-                fontSize:"12px", fontWeight:"700", background:"#0033cc", color:"#fff"
-              }}>
+              <button onClick={save} className="mini-btn primary">
                 Save
               </button>
-              <span style={{fontSize:"12px", color:"#444"}}>{status}</span>
+              <span style={{fontSize:"12px", color:"var(--muted)"}}>{status}</span>
             </div>
-            <div style={{fontSize:"11px", color:"#999", marginTop:"14px"}}>
+            <div style={{fontSize:"11px", color:"var(--muted)", marginTop:"14px"}}>
               Changes apply immediately for everyone — no redeploy needed. Rows with an empty name are removed automatically.
             </div>
           </>
@@ -195,7 +185,7 @@ function AuditLogViewer() {
     if (action?.startsWith("export.") || action === "report.create") return { background:"#e6f4ea", color:"#137333" };
     if (action?.startsWith("template.") || action?.startsWith("logo.")) return { background:"#fef7e0", color:"#994d00" };
     if (action === "chat") return { background:"#f3e8fd", color:"#6633cc" };
-    return { background:"#eee", color:"#444" };
+    return { background:"#eee", color:"var(--muted)" };
   };
 
   const visible = (entries || []).filter(e =>
@@ -208,42 +198,39 @@ function AuditLogViewer() {
   return (
     <div>
       <div style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px"}}>
-        <div style={{fontSize:"13px", fontWeight:"600", color:"#333"}}>Recent activity</div>
+        <div style={{fontSize:"13px", fontWeight:"600", color:"var(--text)"}}>Recent activity</div>
         <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter by user, action…" style={{
           marginLeft:"auto", padding:"6px 10px", borderRadius:"8px", border:"1px solid #ccd5f0", fontSize:"12px", width:"200px"
         }}/>
-        <button onClick={load} style={{
-          padding:"6px 14px", borderRadius:"20px", border:"none", cursor:"pointer",
-          fontSize:"12px", fontWeight:"600", background:"#e8f0fe", color:"#0033cc"
-        }}>↻ Refresh</button>
+        <button onClick={load} className="mini-btn">↻ Refresh</button>
       </div>
       {error && <div style={{background:"#fdecea", color:"#b71c1c", borderRadius:"8px", padding:"8px 12px", fontSize:"12px", marginBottom:"12px"}}>{error}</div>}
-      {!entries && !error && <div style={{color:"#666", fontSize:"13px"}}>Loading…</div>}
+      {!entries && !error && <div style={{color:"var(--muted)", fontSize:"13px"}}>Loading…</div>}
       {entries && (
         visible.length === 0 ? (
-          <div style={{color:"#999", fontSize:"13px", padding:"16px 0"}}>No matching entries.</div>
+          <div style={{color:"var(--muted)", fontSize:"13px", padding:"16px 0"}}>No matching entries.</div>
         ) : (
           <div style={{maxHeight:"420px", overflowY:"auto", border:"1px solid #eef1fa", borderRadius:"8px"}}>
             <table style={{width:"100%", borderCollapse:"collapse", fontSize:"12px"}}>
               <thead>
-                <tr style={{position:"sticky", top:0, background:"#fff"}}>
+                <tr style={{position:"sticky", top:0, background:"var(--surface)"}}>
                   {["When", "User", "Action", "Detail"].map(h => (
-                    <th key={h} style={{textAlign:"left", color:"#667", padding:"8px 10px", borderBottom:"2px solid #eef1fa"}}>{h}</th>
+                    <th key={h} style={{textAlign:"left", color:"var(--muted)", padding:"8px 10px", borderBottom:"1px solid var(--border)"}}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {visible.map(e => (
-                  <tr key={e.id} style={{borderBottom:"1px solid #f4f6fc"}}>
-                    <td style={{padding:"6px 10px", whiteSpace:"nowrap", color:"#556"}}>{fmtTime(e.at)}</td>
-                    <td style={{padding:"6px 10px", fontWeight:"600", color:"#223"}}>{e.username || "—"}</td>
+                  <tr key={e.id} style={{borderBottom:"1px solid var(--border)"}}>
+                    <td style={{padding:"6px 10px", whiteSpace:"nowrap", color:"var(--muted)"}}>{fmtTime(e.at)}</td>
+                    <td style={{padding:"6px 10px", fontWeight:"600", color:"var(--text)"}}>{e.username || "—"}</td>
                     <td style={{padding:"6px 10px"}}>
                       <span style={{
                         ...actionStyle(e.action),
                         display:"inline-block", padding:"2px 8px", borderRadius:"10px", fontSize:"11px", fontWeight:"600"
                       }}>{e.action}{e.provider ? ` · ${e.provider}` : ""}</span>
                     </td>
-                    <td style={{padding:"6px 10px", color:"#556"}}>
+                    <td style={{padding:"6px 10px", color:"var(--muted)"}}>
                       {e.detail || ""}{e.model ? ` (${e.model})` : ""}
                     </td>
                   </tr>
@@ -253,7 +240,7 @@ function AuditLogViewer() {
           </div>
         )
       )}
-      <div style={{fontSize:"11px", color:"#999", marginTop:"14px"}}>
+      <div style={{fontSize:"11px", color:"var(--muted)", marginTop:"14px"}}>
         Shows the latest 300 events. Exports are recorded when a user clicks Export PDF / RTF in their browser; chats record the provider and model that answered.
       </div>
     </div>
@@ -263,7 +250,4 @@ function AuditLogViewer() {
 const cellInput = {
   width:"100%", padding:"7px 10px", borderRadius:"6px", border:"1px solid #ccd5f0", fontSize:"13px"
 };
-const editBtn = {
-  padding:"6px 14px", borderRadius:"20px", border:"none", cursor:"pointer",
-  fontSize:"12px", fontWeight:"600", background:"#e8f0fe", color:"#0033cc"
-};
+

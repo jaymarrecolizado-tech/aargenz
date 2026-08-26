@@ -9,9 +9,14 @@
 //
 // AI provider - swaps the live Groq-hosted model for a local model
 // (Ollama / LM Studio / llama.cpp / vLLM). See LOCAL_AI_PLAN.md.
-//   AI_PROVIDER: "groq" (default) | "local" | "auto" (local first, Groq fallback)
+//   AI_PROVIDER: "auto" (default: local first, cloud fallback) | "local" | "groq"
 //   LOCAL_BASE_URL: base URL of the local OpenAI-compatible server
 //   LOCAL_MODEL: model name served by the local server
+//
+//   LOCAL_JSON_MODE: true → send response_format {type:"json_object"} on every
+//     LOCAL-model call (Phase 6). Only useful for fine-tuned models trained to
+//     answer with a single JSON object; never applied to Groq/xAI. Server
+//     equivalent: env LOCAL_JSON_MODE=1.
 //
 // Responses stream (SSE) to the chat automatically when the provider supports
 // it; OpenRouter is used as a last-resort cloud fallback when Groq fails.
@@ -35,7 +40,7 @@ const CONFIG = {
   XAI_MODEL: "grok-4.6",
   OPENROUTER_API_KEY: "YOUR_OPENROUTER_API_KEY",
   OPENROUTER_MODEL: "meta-llama/llama-3.3-70b-versatile",
-  AI_PROVIDER: "groq",
+  AI_PROVIDER: "auto",
   LOCAL_BASE_URL: "http://localhost:11434/v1",
   LOCAL_MODEL: "qwen3:14b",
   LOCAL_TIMEOUT_MS: 120000

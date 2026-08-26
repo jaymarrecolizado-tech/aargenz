@@ -95,6 +95,19 @@ export default function App() {
   const [splitView, setSplitView] = useState(() => {
     try { return localStorage.getItem("aar-split-view") !== "off"; } catch { return true; }
   });
+  // Phase 6: light/dark theme (persisted per browser). The report preview is
+  // deliberately left as white "paper" in both themes — it mirrors the print.
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem("aar-theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
+  });
+  const toggleTheme = () => setTheme(prev => {
+    const next = prev === "dark" ? "light" : "dark";
+    try { localStorage.setItem("aar-theme", next); } catch { /* ignore */ }
+    return next;
+  });
+  // Phase 6 bulk generation: how many reports were completed this session —
+  // shown next to the New Report button so encoders can chain activities.
+  const [sessionDone, setSessionDone] = useState(0);
   const [headerGallery, setHeaderGallery] = useState(() => loadGallery(HEADER_GALLERY_KEY));
   const [footerGallery, setFooterGallery] = useState(() => loadGallery(FOOTER_GALLERY_KEY));
   const fileRef = useRef(null);
@@ -225,8 +238,15 @@ export default function App() {
     setTab("chat");
   };
 
+  // Phase 6 bulk generation: a finished report is already autosaved server-side,
+  // so starting the next activity only needs a reassuring confirm instead of a
+  // scary "this clears everything" one.
   const handleReset = () => {
-    if (!window.confirm("Start a new report? This clears the current conversation and report.")) return;
+    const finished = !!reportData && syncState === "saved";
+    const msg = finished
+      ? `Start activity #${sessionDone + 1}? ✓ "${draftTitle()}" is saved in My Reports.`
+      : "Start a new report? This clears the current conversation and report.";
+    if (!window.confirm(msg)) return;
     applyBranding(template);
     clearState();
     resetManualEdits();
@@ -344,6 +364,7 @@ export default function App() {
               role: "assistant",
               content: stripFences(text) + "\n\n✅ **Report data collected!** Click the **Preview Report** tab to see your formatted AAR. Don't forget to upload photos!"
             }]);
+            setSessionDone(n => n + 1);
             setTab("preview");
             setLoading(false);
             setStreamingText(null);
@@ -470,97 +491,97 @@ export default function App() {
   }
 
   return (
-    <div style={{
-      fontFamily:"'Segoe UI', system-ui, sans-serif",
+    <div
+      className="app-shell"
+      data-theme={theme}
+      style={{
       minHeight:"100vh",
-      background:"linear-gradient(135deg, #f0f4ff 0%, #e8f0fe 50%, #f5f0ff 100%)",
       display:"flex", flexDirection:"column"
     }}>
-      <div style={{background:"linear-gradient(135deg,#0011aa,#0033cc)", padding:"14px 24px", display:"flex", alignItems:"center", gap:"16px", boxShadow:"0 2px 16px rgba(0,0,150,0.3)"}}>
+      <div className="hdr">
         <div>
-          <div style={{color:"#fff", fontSize:"18px", fontWeight:"900", letterSpacing:"-0.5px"}}>
-            <span style={{color:"#66aaff"}}>e</span>LGU <span style={{color:"#ffaa33"}}>e</span><span style={{color:"#66ff88"}}>GOV</span><span style={{color:"#ff6666", fontSize:"12px"}}>PH</span>
-            <span style={{color:"rgba(255,255,255,0.6)", fontSize:"13px", fontWeight:"400", marginLeft:"10px"}}>AAR Generator</span>
-          </div>
-          <div style={{color:"rgba(255,255,255,0.6)", fontSize:"11px", marginTop:"1px"}}>AI-Powered Accomplishment Activity Report</div>
+          <div className="brand-name"><span className="hl">DICT</span> <span className="hl2">R2</span>&nbsp;AAR Generator</div>
+          <div className="brand-sub">AI-Powered Accomplishment Activity Report</div>
         </div>
-        <div style={{marginLeft:"auto", display:"flex", gap:"8px", alignItems:"center"}}>
-          {[["chat","💬 Chat"],["preview","📄 Preview Report"],["reports","🗂️ My Reports"], ...(user.role === "admin" ? [["admin","⚙️ Admin"]] : [])].map(([t,label]) => (
-            <button key={t} onClick={() => setTab(t)} style={{
-              padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600",
-              background: tab===t ? "#fff" : "rgba(255,255,255,0.15)",
-              color: tab===t ? "#0033cc" : "#fff", transition:"all .2s"
-            }}>
+        <div className="header-actions" style={{marginLeft:"auto", display:"flex", gap:"6px", alignItems:"center", flexWrap:"wrap"}}>
+          {[["chat","Chat"],["preview","Preview"],["reports","My Reports"], ...(user.role === "admin" ? [["admin","Admin"]] : [])].map(([t,label]) => (
+            <button key={t} onClick={() => setTab(t)} className={"tab" + (tab===t ? " active" : "")}>
               {label}
             </button>
           ))}
-          <button onClick={handleReset} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff"}}>
-            🔄 New Report
+          <span className="hdr-sep" />
+          <button onClick={handleReset} title="Finish this activity and start the next one (bulk generation)" className={"hbtn" + (sessionDone > 0 ? " go" : "")}>
+            {sessionDone > 0 ? `Next Activity (${sessionDone} done)` : "New Report"}
           </button>
-          <button onClick={() => { const next = !splitView; setSplitView(next); try { localStorage.setItem("aar-split-view", next ? "on" : "off"); } catch { /* ignore */ } }} title="Show live preview while chatting" style={{
-            padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600",
-            background: splitView ? "#fff" : "rgba(255,255,255,0.15)",
-            color: splitView ? "#0033cc" : "#fff"
-          }}>
-            🪟 Split
+          {sessionDone > 0 && (
+            <span className="chip" title="Reports completed in this browser session (all autosaved)">
+              {sessionDone} done
+            </span>
+          )}
+          <button onClick={toggleTheme} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} className="hbtn">
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
+          <button onClick={() => { const next = !splitView; setSplitView(next); try { localStorage.setItem("aar-split-view", next ? "on" : "off"); } catch { /* ignore */ } }} title="Show live preview while chatting" className={"hbtn" + (splitView ? " on" : "")}>
+            Split View
           </button>
           {reportData && tab==="preview" && (
             <>
-              <button onClick={() => fileRef.current?.click()} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff"}}>
-                📷 Upload Photos
+              <button onClick={() => fileRef.current?.click()} className="hbtn">
+                Upload Photos
               </button>
-              <button onClick={() => { api.auditEvent("export.pdf"); printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout }); }} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#ff6600", color:"#fff"}}>
+              <button onClick={() => { api.auditEvent("export.pdf"); printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout }); }} className="hbtn primary">
                 Export PDF
               </button>
-              <button onClick={() => { api.auditEvent("export.rtf"); exportRtf(reportData, photos, template); }} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"#7a5af8", color:"#fff"}}>
-                📄 Export RTF
+              <button onClick={() => { api.auditEvent("export.rtf"); exportRtf(reportData, photos, template); }} className="hbtn">
+                Export RTF
               </button>
-              <button onClick={handleDownloadDataset} style={{padding:"7px 16px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff"}} title="Download this report as a fine-tuning example (sharegpt JSONL)">
-                📥 Dataset
+              <button onClick={handleDownloadDataset} className="hbtn" title="Download this report as a fine-tuning example (sharegpt JSONL)">
+                Dataset
               </button>
             </>
           )}
           <TemplatePicker templates={templates} templateId={template.id} onChange={handleSelectTemplate}/>
           {user?.role === "admin" && <ProviderPicker aiOverrides={aiOverrides} defaults={AI_DEFAULTS} onChange={updateAiOverrides}/>}
-          <button onClick={() => headerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:headerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"8px"}} title="Upload your own header for this project">
-            {headerImgData?"✓ Header":"📄 Header"}
+          <span className="hdr-sep" />
+          <button onClick={() => headerRef.current?.click()} className={"hbtn small" + (headerImgData ? " ok" : "")} title="Upload your own header for this project">
+            {headerImgData ? "Header ✓" : "Header"}
           </button>
           {headerIsCustom && (
-            <button onClick={resetHeaderToProject} title="Reset to this project's default header (set by admin)" style={{padding:"5px 8px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", background:"rgba(255,255,255,0.15)", color:"#fff"}}>↺</button>
+            <button onClick={resetHeaderToProject} title="Reset to this project's default header (set by admin)" className="hbtn small">↺</button>
           )}
-          <select title="Header options" value="" onChange={e => { if (e.target.value) pickHeaderFromGallery(e.target.value); }}
-            style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}>
+          <select title="Header options" value="" onChange={e => { if (e.target.value) pickHeaderFromGallery(e.target.value); }} className="hselect">
             <option value="">Header ▾</option>
             <option value="__default">Project header (admin)</option>
             <option value="__none">No header</option>
             {headerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
           </select>
-          <button onClick={() => footerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:footerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"4px"}} title="Pick your own footer for this project">
-            {footerImgData?"✓ Footer":"📄 Footer"}
+          <button onClick={() => footerRef.current?.click()} className={"hbtn small" + (footerImgData ? " ok" : "")} title="Pick your own footer for this project">
+            {footerImgData ? "Footer ✓" : "Footer"}
           </button>
           {footerIsCustom && (
-            <button onClick={resetFooterToProject} title="Reset to this project's default footer (set by admin)" style={{padding:"5px 8px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", background:"rgba(255,255,255,0.15)", color:"#fff"}}>↺</button>
+            <button onClick={resetFooterToProject} title="Reset to this project's default footer (set by admin)" className="hbtn small">↺</button>
           )}
           <select
             title="Footer — project default or your own"
             value=""
             onChange={e => { if (e.target.value) pickFooterFromGallery(e.target.value); }}
-            style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}
+            className="hselect"
           >
             <option value="">Footer ▾</option>
             <option value="__default">Project footer (admin)</option>
             <option value="__none">No footer</option>
             {footerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
           </select>
+          <span className="hdr-sep" />
           <span title={syncState === "error" ? "Could not reach the server — your work is still saved in this browser" : "Draft sync status"} style={{
-            fontSize:"11px", color: syncState === "error" ? "#ff9999" : "rgba(255,255,255,0.6)", marginLeft:"6px", minWidth:"52px"
+            fontSize:"11px", color: syncState === "error" ? "#ff9e9e" : "rgba(255,255,255,0.55)", minWidth:"52px"
           }}>
-            {syncState === "saving" ? "💾 Saving…" : syncState === "saved" ? "✓ Saved" : syncState === "error" ? "⚠ Offline" : ""}
+            {syncState === "saving" ? "Saving…" : syncState === "saved" ? "Saved" : syncState === "error" ? "Offline" : ""}
           </span>
-          <span style={{fontSize:"11px", color:"#fff", background:"rgba(255,255,255,0.15)", padding:"5px 12px", borderRadius:"20px"}}>
-            {user.username} <span style={{opacity:0.7}}>({user.role})</span>
+          <span className="chip">
+            {user.username} <span style={{opacity:0.6}}>({user.role})</span>
           </span>
-          <button onClick={handleLogout} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:"rgba(255,255,255,0.15)", color:"#fff"}}>
+          <button onClick={handleLogout} className="hbtn small">
             Sign out
           </button>
         </div>
@@ -569,10 +590,10 @@ export default function App() {
       <input ref={headerRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleHeaderUpload}/>
       <input ref={footerRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFooterUpload}/>
 
-      <div style={{flex:1, overflow:"auto", padding:"24px", display:"flex", justifyContent:"center"}}>
+      <div className="page-pad" style={{flex:1, overflow:"auto", padding:"24px", display:"flex", justifyContent:"center"}}>
         {tab === "chat" ? (
-          <div style={{display:"flex", gap:"16px", width:"100%", maxWidth:"1500px"}}>
-            <div style={{flex: splitView ? "1 1 480px" : "0 0 auto", minWidth:"320px", maxWidth: splitView ? undefined : "680px", width: splitView ? undefined : "100%"}}>
+          <div className="split-wrap" style={{display:"flex", gap:"16px", width:"100%", maxWidth:"1500px"}}>
+            <div className="split-chat" style={{flex: splitView ? "1 1 480px" : "0 0 auto", minWidth:"320px", maxWidth: splitView ? undefined : "680px", width: splitView ? undefined : "100%"}}>
               <ChatPanel
                 messages={messages}
                 loading={loading}
@@ -583,11 +604,11 @@ export default function App() {
               />
             </div>
             {splitView && (
-              <div style={{flex:"1 1 520px", minWidth:"380px", maxHeight:"calc(100vh - 140px)", overflowY:"auto"}}>
+              <div className="split-preview" style={{flex:"1 1 520px", minWidth:"380px", maxHeight:"calc(100vh - 140px)", overflowY:"auto"}}>
                 {reportData ? (
-                  <div style={{background:"#fff", borderRadius:"12px", overflow:"hidden", boxShadow:"0 4px 24px rgba(0,0,100,0.15)"}}>
-                    <div style={{background:"#e8f0fe", color:"#0033cc", fontSize:"11px", fontWeight:"700", padding:"6px 14px", position:"sticky", top:0, zIndex:2}}>
-                      🔴 LIVE PREVIEW — fills in as you answer
+                  <div className="paper">
+                    <div className="live-banner">
+                      LIVE PREVIEW — fills in as you answer
                     </div>
                     <ReportPreview
                       data={reportData}
@@ -604,12 +625,9 @@ export default function App() {
                     />
                   </div>
                 ) : (
-                  <div style={{
-                    height:"calc(100vh - 160px)", border:"2px dashed #b8c8f0", borderRadius:"12px",
-                    display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
-                    color:"#8899bb", textAlign:"center", padding:"24px"
+                  <div className="placeholder" style={{
+                    height:"calc(100vh - 160px)"
                   }}>
-                    <div style={{fontSize:"44px", marginBottom:"12px"}}>📄</div>
                     <div style={{fontWeight:"600", marginBottom:"6px"}}>Live preview</div>
                     <div style={{fontSize:"13px", maxWidth:"280px"}}>
                       As the AI confirms your answers, the report builds up here in real time.
@@ -622,11 +640,11 @@ export default function App() {
         ) : tab === "reports" ? (
           <MyReports user={user} onOpen={(full) => { handleOpenSaved(full); }}/>
         ) : tab === "admin" ? (
-          <AdminPanel templates={templates || [getBuiltinTemplate("aar-elgu")]} onPersonnelSaved={() => fetchTemplates().then(setTemplates)}/>
+          <AdminPanel templates={templates || [getBuiltinTemplate("aar-elgu")]} onPersonnelSaved={() => fetchTemplates().then(setTemplates)} user={user}/>
         ) : (
           <div style={{width:"100%", maxWidth:"850px"}}>
             {reportData ? (
-              <div style={{background:"#fff", borderRadius:"12px", overflow:"hidden", boxShadow:"0 4px 24px rgba(0,0,100,0.15)"}}>
+              <div className="paper">
                 <ReportPreview
                   data={reportData}
                   photos={photos}
@@ -642,11 +660,10 @@ export default function App() {
                 />
               </div>
             ) : (
-              <div style={{textAlign:"center", padding:"80px 24px", color:"#666"}}>
-                <div style={{fontSize:"48px", marginBottom:"16px"}}>📋</div>
-                <div style={{fontSize:"20px", fontWeight:"600", color:"#333", marginBottom:"8px"}}>No report yet</div>
+              <div style={{textAlign:"center", padding:"80px 24px", color:"var(--muted)"}}>
+                <div style={{fontSize:"20px", fontWeight:"600", color:"var(--text)", marginBottom:"8px"}}>No report yet</div>
                 <div>Complete the chat conversation to generate your report.</div>
-                <button onClick={() => setTab("chat")} style={{marginTop:"20px", padding:"10px 24px", borderRadius:"20px", border:"none", background:"#0033cc", color:"#fff", fontWeight:"600", cursor:"pointer"}}>Go to Chat →</button>
+                <button onClick={() => setTab("chat")} className="btn primary" style={{marginTop:"20px"}}>Go to Chat →</button>
               </div>
             )}
           </div>
@@ -656,9 +673,185 @@ export default function App() {
       <style>{`
         @keyframes bounce { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }
         * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #c0ccff; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: #cfd5de; border-radius: 4px; }
+
+        /* ================= Design tokens (premium / minimal) ================ */
+        .app-shell {
+          --bg: #f5f6f8;
+          --surface: #ffffff;
+          --border: #e4e7ec;
+          --border-strong: #d0d5dd;
+          --text: #1a2233;
+          --muted: #667085;
+          --accent: #0033cc;
+          --accent-hover: #002aa6;
+          --accent-soft: #eef2ff;
+          --header: #111a2e;
+          font-family: -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+          background: var(--bg);
+          color: var(--text);
+          -webkit-font-smoothing: antialiased;
+        }
+        .app-shell[data-theme="dark"] {
+          --bg: #0d1117;
+          --surface: #151b27;
+          --border: #29303f;
+          --border-strong: #39415a;
+          --text: #e6e9f0;
+          --muted: #98a2b3;
+          --accent: #6b95ff;
+          --accent-hover: #8badff;
+          --accent-soft: rgba(107,149,255,0.12);
+          --header: #0a0e18;
+        }
+        .app-shell[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #39415a; }
+
+        /* ---- Header ---- */
+        .hdr {
+          background: var(--header);
+          border-bottom: 1px solid rgba(255,255,255,0.07);
+          padding: 12px 28px;
+          display: flex; align-items: center; gap: 24px;
+        }
+        .brand-name { color:#fff; font-size:16px; font-weight:700; letter-spacing:-0.2px; white-space:nowrap; }
+        .brand-name .hl { color:#8ab4ff; }
+        .brand-name .hl2 { color:#ffb35c; }
+        .brand-sub { color:rgba(255,255,255,0.5); font-size:11px; margin-top:2px; letter-spacing:0.2px; }
+        .hdr-sep { width:1px; height:20px; background:rgba(255,255,255,0.14); margin:0 4px; }
+
+        /* Header buttons — flat outline style, no glass */
+        .tab, .hbtn {
+          padding: 7px 14px; border-radius: 7px;
+          border: 1px solid transparent; background: transparent;
+          color: rgba(255,255,255,0.75); font-size: 12px; font-weight: 600;
+          cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+        }
+        .tab:hover, .hbtn:hover { background: rgba(255,255,255,0.08); color:#fff; }
+        .tab.active { background:#fff; color:#141a26; }
+        .hbtn { border-color: rgba(255,255,255,0.25); }
+        .hbtn.on { background:#fff; border-color:#fff; color:#141a26; }
+        .hbtn.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+        .hbtn.primary:hover { background:#1d4ed8; }
+        .hbtn.go { background:#15803d; border-color:#15803d; color:#fff; }
+        .hbtn.go:hover { background:#166534; }
+        .hbtn.ok { border-color:#15803d; color:#86efac; }
+        .hbtn.small { padding: 5px 10px; font-size: 11px; }
+        .hselect {
+          font-size: 11px; padding: 6px 8px; border-radius: 7px;
+          border: 1px solid rgba(255,255,255,0.25); background: transparent;
+          color: #fff; cursor: pointer; outline: none;
+        }
+        .hselect option { color:#141a26; }
+        .chip {
+          font-size: 11px; color: rgba(255,255,255,0.85);
+          border: 1px solid rgba(255,255,255,0.22);
+          padding: 6px 10px; border-radius: 7px; white-space: nowrap;
+        }
+
+        /* ---- Surfaces ---- */
+        .panel {
+          background: var(--surface);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          box-shadow: 0 1px 2px rgba(16,24,40,0.05);
+        }
+        /* The generated report stays white "paper" in both themes */
+        .paper { background:#fff; border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+        .live-banner {
+          background: var(--accent-soft); color: var(--accent);
+          font-size: 11px; font-weight: 700; letter-spacing: 0.3px;
+          padding: 6px 14px; position: sticky; top: 0; z-index: 2;
+          border-bottom: 1px solid var(--border);
+        }
+        .placeholder {
+          border: 1px dashed var(--border-strong); border-radius: 10px;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          color: var(--muted); text-align: center; padding: 24px;
+        }
+
+        /* ---- Buttons & inputs on surfaces ---- */
+        .btn {
+          padding: 9px 18px; border-radius: 7px; border: 1px solid transparent;
+          cursor: pointer; font-size: 13px; font-weight: 600; transition: background .15s;
+        }
+        .btn.primary { background: var(--accent); color: #fff; }
+        .btn.primary:hover { background: var(--accent-hover); }
+        .mini-btn {
+          padding: 5px 12px; border-radius: 6px; cursor: pointer;
+          border: 1px solid var(--border-strong); background: var(--surface);
+          color: var(--text); font-size: 12px; font-weight: 600;
+          transition: border-color .15s, color .15s;
+        }
+        .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .mini-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .mini-btn.primary:hover { background: var(--accent-hover); color:#fff; }
+        .mini-btn.danger { border-color: #f1b3b3; color: #c62a2a; background: var(--surface); }
+        .mini-btn.danger:hover { border-color: #c62a2a; }
+        .seg {
+          padding: 6px 14px; border-radius: 7px; cursor: pointer;
+          border: 1px solid var(--border); background: transparent;
+          color: var(--muted); font-size: 12px; font-weight: 600;
+          transition: all .15s;
+        }
+        .seg.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .err-box { background:#fdecea; color:#b71c1c; border-radius:8px; padding:8px 12px; font-size:12px; margin-bottom:12px; }
+        [data-theme="dark"] .err-box { background:#3a1a1e; color:#ff9e9e; }
+        .ok-box { background:#e8f5e9; color:#1b5e20; border-radius:8px; padding:8px 12px; font-size:12px; margin-bottom:12px; }
+        [data-theme="dark"] .ok-box { background:#12301c; color:#86efac; }
+
+        /* ---- Chat ---- */
+        .chat-tip {
+          background: var(--accent-soft); color: var(--accent);
+          border: 1px solid var(--border); border-radius: 8px;
+          padding: 10px 14px; margin-bottom: 16px; font-size: 12px;
+        }
+        .msg-row { display:flex; margin-bottom:12px; justify-content:flex-start; }
+        .msg-row.user { justify-content:flex-end; }
+        .avatar {
+          width:30px; height:30px; border-radius:8px; background:var(--accent);
+          display:flex; align-items:center; justify-content:center; color:#fff;
+          font-size:10px; font-weight:700; flex-shrink:0; margin-right:8px; margin-top:2px;
+        }
+        .bubble-ai, .bubble-user {
+          max-width:72%; padding:10px 14px; font-size:14px; line-height:1.6;
+          word-break:break-word;
+        }
+        .bubble-ai { background:var(--surface); border:1px solid var(--border); color:var(--text); border-radius:10px; }
+        .bubble-user { background:var(--accent); color:#fff; border-radius:10px; }
+        [data-theme="dark"] .bubble-user { color:#fff; }
+        .typing {
+          background:var(--surface); border:1px solid var(--border); border-radius:10px;
+          padding:12px 16px; display:flex; gap:4px; align-items:center;
+        }
+        .typing .dot { width:6px; height:6px; border-radius:50%; background:var(--muted); animation:bounce 1s infinite; }
+        .chat-input {
+          flex:1; padding:11px 16px; border-radius:8px;
+          border:1px solid var(--border-strong); background:var(--surface); color:var(--text);
+          outline:none; font-size:14px; transition:border-color .15s;
+        }
+        .chat-input:focus { border-color:var(--accent); }
+        .send-btn {
+          padding:11px 22px; border-radius:8px; border:none; cursor:pointer;
+          background:var(--accent); color:#fff; font-weight:600; font-size:14px;
+        }
+        .send-btn:hover:not(:disabled) { background:var(--accent-hover); }
+        .send-btn:disabled { opacity:0.5; cursor:default; }
+
+        /* ---- Mobile layout ----------------------------------------------- */
+        @media (max-width: 900px) {
+          .hdr { flex-wrap:wrap; padding:10px 14px; gap:10px; }
+          .header-actions { margin-left:0 !important; width:100%; }
+          .page-pad { padding:12px !important; }
+          .split-wrap { flex-direction:column !important; }
+          .split-chat, .split-preview {
+            flex:1 1 auto !important; min-width:0 !important;
+            max-width:100% !important; width:100% !important;
+          }
+          .split-preview { max-height:none !important; }
+          .chat-root { height:auto !important; min-height:55vh; max-width:100% !important; }
+        }
       `}</style>
     </div>
   );

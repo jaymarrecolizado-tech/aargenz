@@ -16,7 +16,9 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 - Admin panel: personnel lists, template builder, per-template default logos,
   audit log viewer
 
-**Open items:** Phase 6 polish after rollout feedback. (Logo + audit endpoints
+**Open items:** None — Phase 6 polish shipped 2026-08-26 (CSV export, bulk
+generation session counter + next-activity flow, dark mode toggle, mobile
+layout pass, opt-in local JSON mode). (Logo + audit endpoints
 live-verified on 2026-08-26: personnel GET/PUT round-trip, logo POST/DELETE
 file lifecycle, audit entries for login/personnel/logo actions.)
 
@@ -79,12 +81,14 @@ file lifecycle, audit entries for login/personnel/logo actions.)
 
 **Deliverable:** safe for real office-wide use.
 
-## Phase 6 — Polish (optional, after rollout)
+## Phase 6 — Polish (shipped 2026-08-26)
 
-- Bulk generation (multiple activities in one session)
-- Export reports list to Excel/CSV for monitoring
-- Dark mode / mobile layout pass
-- Re-enable JSON mode per-provider for fine-tuned local models (ties into `LOCAL_AI_PLAN.md`)
+| Task | Details |
+|---|---|
+| 6.1 Bulk generation | ✅ Done — header shows a 🏁 per-session completed counter; after a finished report is autosaved, "🔄 New Report" becomes "➕ Next Activity (N done)" with a reassuring confirm ("saved in My Reports") instead of a data-loss warning |
+| 6.2 Export reports to CSV | ✅ Done — `GET /api/reports?format=csv` (admins add `&all=1`): metadata columns + union of flattened report JSON fields, UTF-8 BOM for Excel, audited as `report.export.csv`; "⬇️ Export CSV" button in My Reports |
+| 6.3 Dark mode / mobile layout | ✅ Done — header Light/Dark toggle persisted in localStorage; theme via CSS design tokens (`--bg/--surface/--border/--accent`, `.panel`/`.paper` surfaces); report preview intentionally stays white "paper"; ≤900px media queries stack the split view and wrap the header |
+| 6.4 Local JSON mode | ✅ Done — opt-in `LOCAL_JSON_MODE` (config.js/env) or client `jsonMode:true`; adds `response_format:{type:"json_object"}` to LOCAL-model calls only, never cloud providers |
 
 ## Phase 7 — Live preview & token-efficient collection (agreed 2026-08-24)
 
@@ -111,6 +115,7 @@ consistent personnel names across the office.
 | 8.3 Template builder UI | ✅ Done — `⚙️ Admin → Templates`: guided form (name, opening question, standard/custom questions, beneficiary categories) + advanced raw-JSON mode; server validates and writes `templates/<id>/template.json` + `index.json`; appears in everyone's Template Picker instantly |
 | 8.4 Default header/footer logos | ✅ Done — admins import a Header Logo and Footer Logo per template in the builder (`POST/DELETE /api/templates/:id/logo`, stored under `templates/<id>/`, referenced by `headerLogo`/`footerLogo` in template.json); everyone picking that template gets its branding automatically (per-session overrides still win); `aar-elgu` defaults to the DICT banner |
 | 8.5 Proper A4 pagination | ✅ Done — print-window engine rewritten: accurate block measurement (`flow-root`), section headings never orphaned at a page bottom, oversized tables and photo collages split across pages by row/slot with repeated headers + "(continued)" labels; nothing is clipped |
+| 8.6 User management (2026-08-26) | ✅ Done — Admin → Users: list accounts (+ report/session counts), create users with explicit role, change role, reset password (revokes their sessions), delete account; server guards: admin-only `/api/users*`, no self-delete/self-demotion, last-admin protection; audited as `user.create/role/password_reset/delete` |
 
 ---
 

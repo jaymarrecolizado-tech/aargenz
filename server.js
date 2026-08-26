@@ -45,9 +45,15 @@ const XAI_KEYS = readKeys("XAI");
 const XAI_MODEL = process.env.XAI_MODEL || "grok-4.6";
 const XAI_URL = "https://api.x.ai/v1/chat/completions";
 
-const AI_PROVIDER = process.env.AI_PROVIDER || "groq"; // clients can override per-request via body.provider
+const AI_PROVIDER = process.env.AI_PROVIDER || "auto"; // clients can override per-request via body.provider
 const LOCAL_BASE_URL = (process.env.LOCAL_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3:14b";
+// Phase 6: force {type:"json_object"} on every LOCAL-model call (set
+// LOCAL_JSON_MODE=1 in the environment, or the client can request it per call
+// with body.jsonMode). Only ever applied to the local provider — cloud models
+// reject json_object on prose question turns. Intended for fine-tuned models
+// trained to emit a single JSON object (see LOCAL_AI_PLAN.md).
+const LOCAL_JSON_MODE = /^(1|true|on)$/i.test(process.env.LOCAL_JSON_MODE || "");
 const UPSTREAM_TIMEOUT_MS = 180000;
 
 // Per-user/per-IP token bucket on /api/chat (Phase 5.2): protects the Groq
@@ -97,6 +103,44 @@ function readKeys(prefix) {
   } catch {
     return [];
   }
+}
+
+// ---- Reports list → CSV export (Phase 6) ----------------------------------
+const csvCell = (v) => {
+  const s = v == null ? "" : String(v);
+  return /[",\r\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// Flattens each report row for monitoring spreadsheets: fixed metadata columns
+// plus one column per top-level key found across all rows' report JSON.
+// Arrays of objects become counts, arrays of scalars are joined with "; ",
+// nested objects are stringified — so mixed templates still fit one sheet.
+function reportsToCsv(rows) {
+  const META = ["id", "owner_name", "template_id", "title", "status", "created_at", "updated_at"];
+  const parsed = rows.map(r => {
+    let rep = r.report;
+    if (typeof rep === "string") { try { rep = JSON.parse(rep); } catch { rep = null; } }
+    return { ...r, _rep: rep && typeof rep === "object" && !Array.isArray(rep) ? rep : {} };
+  });
+  const fieldSet = new Set();
+  for (const r of parsed) for (const k of Object.keys(r._rep)) fieldSet.add(k);
+  const fields = [...fieldSet].filter(k => k !== "photos"); // data URLs don't belong in a sheet
+  const cell = (v) => {
+    if (v == null) return "";
+    if (Array.isArray(v)) {
+      return v.length && typeof v[0] === "object" ? `${v.length} item(s)` : v.map(x => String(x?.name ?? x)).join("; ");
+    }
+    if (typeof v === "object") return JSON.stringify(v);
+    return v;
+  };
+  const lines = [[...META, ...fields].map(csvCell).join(",")];
+  for (const r of parsed) {
+    lines.push(
+      [...META.map(m => r[m]), ...fields.map(f => cell(r._rep[f]))].map(csvCell).join(",")
+    );
+  }
+  // UTF-8 BOM so Excel detects the encoding when the file is opened directly.
+  return "\uFEFF" + lines.join("\r\n");
 }
 
 // ---- Template config management (Phase 8.3) ------------------------------
@@ -521,6 +565,118 @@ const server = http.createServer(async (req, res) => {
     return sendJson(405, { error: { message: "Method not allowed" } });
   }
 
+  // ---- User management (Phase 9): admin-only CRUD over accounts -------------
+  // GET    /api/users              list users (+ report/session counts)
+  // POST   /api/users              create {username, password, role}
+  // PUT    /api/users/:id          change role {role}
+  // PUT    /api/users/:id/password reset password {password} (signs out sessions)
+  // DELETE /api/users/:id          delete account (sessions cascade; reports kept)
+  if (url.pathname === "/api/users" || url.pathname.startsWith("/api/users/")) {
+    const admin = await requireAdmin();
+    if (!admin) return;
+    const pool = getPool();
+    const targetId = url.pathname.split("/")[3]; // /api/users/:id
+    try {
+      if (req.method === "GET" && !targetId) {
+        const [rows] = await pool.query(
+          `SELECT u.id, u.username, u.role, u.created_at,
+                  (SELECT COUNT(*) FROM reports r WHERE r.owner = u.id) AS reports,
+                  (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > NOW()) AS sessions
+           FROM users u ORDER BY u.created_at ASC`
+        );
+        return sendJson(200, rows);
+      }
+
+      if (req.method === "POST" && !targetId) {
+        const body = await readBodyJson(req);
+        const username = String(body?.username || "").trim();
+        const password = String(body?.password || "");
+        const role = body?.role === "admin" ? "admin" : "encoder";
+        if (username.length < 3 || username.length > 64) {
+          return sendJson(400, { error: { message: "Username must be 3-64 characters" } });
+        }
+        if (password.length < 6) {
+          return sendJson(400, { error: { message: "Password must be at least 6 characters" } });
+        }
+        const id = crypto.randomUUID();
+        const hash = await bcrypt.hash(password, 10);
+        try {
+          await pool.query(
+            "INSERT INTO users (id, username, password_hash, role) VALUES (?, ?, ?, ?)",
+            [id, username, hash, role]
+          );
+        } catch (e) {
+          if (e.code === "ER_DUP_ENTRY") {
+            return sendJson(409, { error: { message: "Username is already taken" } });
+          }
+          throw e;
+        }
+        writeAudit(admin, "user.create", { detail: `${username} (${role})` });
+        return sendJson(201, { id, username, role });
+      }
+
+      if (targetId) {
+        const [rows] = await pool.query("SELECT id, username, role FROM users WHERE id = ?", [targetId]);
+        const target = rows[0];
+        if (!target) return sendJson(404, { error: { message: "User not found" } });
+
+        // Reset password: admin sets a new one directly; the user's active
+        // sessions are revoked so the new credential takes effect at once.
+        if (req.method === "PUT" && url.pathname.endsWith("/password")) {
+          const body = await readBodyJson(req);
+          const password = String(body?.password || "");
+          if (password.length < 6) {
+            return sendJson(400, { error: { message: "Password must be at least 6 characters" } });
+          }
+          const hash = await bcrypt.hash(password, 10);
+          await pool.query("UPDATE users SET password_hash = ? WHERE id = ?", [hash, target.id]);
+          await pool.query("DELETE FROM sessions WHERE user_id = ?", [target.id]);
+          writeAudit(admin, "user.password_reset", { detail: target.username });
+          return sendJson(200, { ok: true });
+        }
+
+        // Change role.
+        if (req.method === "PUT") {
+          const body = await readBodyJson(req);
+          const role = body?.role;
+          if (role !== "admin" && role !== "encoder") {
+            return sendJson(400, { error: { message: 'role must be "admin" or "encoder"' } });
+          }
+          if (target.id === admin.id) {
+            return sendJson(400, { error: { message: "You cannot change your own role" } });
+          }
+          if (target.role === "admin" && role !== "admin") {
+            const [[counts]] = await pool.query("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'");
+            if (counts.n <= 1) return sendJson(400, { error: { message: "Cannot demote the last admin" } });
+          }
+          await pool.query("UPDATE users SET role = ? WHERE id = ?", [role, target.id]);
+          writeAudit(admin, "user.role", { detail: `${target.username}: ${target.role} → ${role}` });
+          return sendJson(200, { ok: true });
+        }
+
+        // Delete account. Sessions cascade via FK; the user's reports are
+        // intentionally KEPT (government records) — they just lose their owner.
+        if (req.method === "DELETE") {
+          if (target.id === admin.id) {
+            return sendJson(400, { error: { message: "You cannot delete your own account" } });
+          }
+          if (target.role === "admin") {
+            const [[counts]] = await pool.query("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'");
+            if (counts.n <= 1) return sendJson(400, { error: { message: "Cannot delete the last admin" } });
+          }
+          await pool.query("DELETE FROM users WHERE id = ?", [target.id]);
+          writeAudit(admin, "user.delete", { detail: `${target.username} (${target.role})` });
+          return sendJson(200, { ok: true });
+        }
+      }
+
+      return sendJson(405, { error: { message: "Method not allowed" } });
+    } catch (e) {
+      console.error("[users]", e.message);
+      return sendJson(500, { error: { message: "Database error: " + e.message } });
+    }
+  }
+
   if (url.pathname === "/api/auth/register" || url.pathname === "/api/auth/login") {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
@@ -669,6 +825,25 @@ const server = http.createServer(async (req, res) => {
       // excluded). Admins can list everyone's with ?all=1.
       if (req.method === "GET" && !reportId) {
         const all = url.searchParams.get("all") === "1" && user.role === "admin";
+        // CSV download (Phase 6): ?format=csv exports the same view as a
+        // spreadsheet — admins get everyone's rows with ?all=1, encoders
+        // their own. Includes the flattened report JSON for monitoring.
+        if (url.searchParams.get("format") === "csv") {
+          const [rows] = await pool.query(
+            `SELECT r.id, u.username AS owner_name, r.template_id, r.title, r.status,
+                    r.report, r.created_at, r.updated_at
+             FROM reports r LEFT JOIN users u ON u.id = r.owner
+             ${all ? "" : "WHERE r.owner = ?"}
+             ORDER BY r.updated_at DESC`,
+            all ? [] : [user.id]
+          );
+          writeAudit(user, "report.export.csv", { detail: `${rows.length} row(s)${all ? " (all users)" : ""}` });
+          res.writeHead(200, {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": `attachment; filename="aar-reports-${new Date().toISOString().slice(0, 10)}.csv"`
+          });
+          return res.end(reportsToCsv(rows));
+        }
         const [rows] = await pool.query(
           `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.status, r.created_at, r.updated_at
            FROM reports r LEFT JOIN users u ON u.id = r.owner
@@ -785,8 +960,13 @@ const server = http.createServer(async (req, res) => {
       model,
       max_tokens: (body && body.max_tokens) || 4000,
       temperature: 0.2,
-      // No response_format: the assistant asks questions in prose first and
-      // only emits the final JSON at the end (see SYSTEM_PROMPT in index.html).
+      // Phase 6: opt-in strict JSON output, local model ONLY (fine-tuned
+      // models that always answer with a single JSON object). Cloud providers
+      // never get response_format — json_object breaks their prose questions.
+      // Enabled via env LOCAL_JSON_MODE=1 or the client sending jsonMode:true.
+      response_format: provider === "local" && (body?.jsonMode === true || LOCAL_JSON_MODE)
+        ? { type: "json_object" }
+        : undefined,
       stream: wantsStream || undefined, // omitted when false
       messages
     });
@@ -797,20 +977,33 @@ const server = http.createServer(async (req, res) => {
     // is used for AI_PROVIDER=local.
     let groqCandidates = [];
     let xaiCandidates = [];
+    let localCandidates = [];
     if (provider === "local") {
       if (!LOCAL_MODEL) {
         res.writeHead(500, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: { message: "LOCAL_MODEL is not set on the server" } }));
       }
-      groqCandidates = [{
+      localCandidates = [{
         url: LOCAL_BASE_URL + "/chat/completions",
         body: makeBody(LOCAL_MODEL),
         headers: { "Content-Type": "application/json" },
         label: "local model",
         model: LOCAL_MODEL
       }];
+      groqCandidates = localCandidates;
     } else {
-      if (!GROQ_KEYS.length && !XAI_KEYS.length) {
+      // Auto (default): try the local model first when one is configured,
+      // then fall back to the Groq/xAI key pools below.
+      if (provider === "auto" && LOCAL_MODEL) {
+        localCandidates = [{
+          url: LOCAL_BASE_URL + "/chat/completions",
+          body: makeBody(LOCAL_MODEL),
+          headers: { "Content-Type": "application/json" },
+          label: "local model",
+          model: LOCAL_MODEL
+        }];
+      }
+      if (!GROQ_KEYS.length && !XAI_KEYS.length && !localCandidates.length) {
         res.writeHead(500, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: { message: "GROQ_API_KEY / GROQ_API_KEYS (or XAI_API_KEY / XAI_API_KEYS) is not set (set them in the environment or config.js)" } }));
       }
@@ -843,12 +1036,15 @@ const server = http.createServer(async (req, res) => {
       let lastKeyErr = null; // { status, text } of the last rate-limited/rejected key
       let allKeyIssues = true;
 
-      // Phase 1: Groq keys (or the local model), starting from the last key
-      // that worked. Phase 2: xAI (Grok) keys - only reached when every Groq
-      // key is exhausted.
+      // Phase order: auto → local model first, then Groq keys (starting from
+      // the last key that worked), then xAI (Grok) keys - only reached when
+      // every earlier option is unreachable/exhausted.
       const phases = provider === "local"
         ? [{ candidates: groqCandidates, cursor: () => 0, setCursor: () => {} }]
         : [
+            ...(provider === "auto"
+              ? [{ candidates: localCandidates, cursor: () => 0, setCursor: () => {} }]
+              : []),
             { candidates: groqCandidates, cursor: () => groqKeyCursor, setCursor: (i) => { groqKeyCursor = i; } },
             { candidates: xaiCandidates, cursor: () => xaiKeyCursor, setCursor: (i) => { xaiKeyCursor = i; } }
           ];
@@ -874,11 +1070,19 @@ const server = http.createServer(async (req, res) => {
             continue;
           }
           // Key-related failures (rate limit / invalid key) → try the next key.
-          const keyIssue = provider !== "local" && [401, 403, 429].includes(upRes.status);
-          if (!upRes.ok && keyIssue) {
-            const text = await upRes.text().catch(() => ""); // drain so the connection can be reused
-            lastKeyErr = { status: upRes.status, text };
-            console.warn(`[proxy] ${cand.label} key ${idx + 1}/${list.length} returned ${upRes.status}; trying next key`);
+          // In auto mode a failed/unreachable LOCAL model is also non-terminal:
+          // it just means "move on to the cloud pools".
+          const fromLocal = cand.label === "local model";
+          const keyIssue = provider !== "local" && !fromLocal && [401, 403, 429].includes(upRes.status);
+          if (!upRes.ok && (keyIssue || (fromLocal && provider === "auto"))) {
+            await upRes.text().catch(() => ""); // drain so the connection can be reused
+            if (keyIssue) {
+              lastKeyErr = { status: upRes.status, text: "" };
+              console.warn(`[proxy] ${cand.label} key ${idx + 1}/${list.length} returned ${upRes.status}; trying next key`);
+            } else {
+              lastErr = new Error(`${cand.label} returned ${upRes.status}`);
+              console.warn(`[proxy] ${cand.label} returned ${upRes.status}; falling back to next provider`);
+            }
             upRes = null;
             continue;
           }

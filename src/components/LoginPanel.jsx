@@ -30,17 +30,18 @@ export default function LoginPanel({ onAuth }) {
   return (
     <div style={{
       minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
-      background:"linear-gradient(135deg, #f0f4ff 0%, #e8f0fe 50%, #f5f0ff 100%)",
-      fontFamily:"'Segoe UI', system-ui, sans-serif"
+      background:"#f5f6f8",
+      fontFamily:"-apple-system, 'Segoe UI', system-ui, Roboto, sans-serif"
     }}>
       <form onSubmit={submit} style={{
-        background:"#fff", borderRadius:"12px", boxShadow:"0 4px 24px rgba(0,0,100,0.15)",
+        background:"#fff", border:"1px solid #e4e7ec", borderRadius:"10px",
+        boxShadow:"0 1px 2px rgba(16,24,40,0.05)",
         padding:"32px", width:"340px"
       }}>
-        <div style={{fontSize:"20px", fontWeight:"900", color:"#0011aa", marginBottom:"4px"}}>
-          <span style={{color:"#66aaff"}}>e</span>LGU <span style={{color:"#ffaa33"}}>e</span><span style={{color:"#66ff88"}}>GOV</span><span style={{color:"#ff6666", fontSize:"12px"}}>PH</span>
+        <div style={{fontSize:"19px", fontWeight:"700", color:"#111a2e", marginBottom:"4px"}}>
+          <span style={{color:"#2563eb"}}>DICT</span> <span style={{color:"#d97706"}}>R2</span> AAR Generator
         </div>
-        <div style={{fontSize:"13px", color:"#666", marginBottom:"20px"}}>AAR Generator — sign in to continue</div>
+        <div style={{fontSize:"13px", color:"#667085", marginBottom:"20px"}}>DICT Region 2 — sign in to continue</div>
 
         <label style={lbl}>Username
           <input value={username} onChange={e => setUsername(e.target.value)} autoFocus style={inp}/>
@@ -57,7 +58,7 @@ export default function LoginPanel({ onAuth }) {
         {error && <div style={{background:"#fdecea", color:"#b71c1c", borderRadius:"8px", padding:"8px 12px", fontSize:"12px", marginBottom:"12px"}}>{error}</div>}
 
         <button disabled={busy} type="submit" style={{
-          width:"100%", padding:"10px", borderRadius:"20px", border:"none", cursor: busy ? "wait" : "pointer",
+          width:"100%", padding:"10px", borderRadius:"7px", border:"none", cursor: busy ? "wait" : "pointer",
           background:"#0033cc", color:"#fff", fontWeight:"600", fontSize:"14px", marginBottom:"12px"
         }}>
           {busy ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}
@@ -75,8 +76,8 @@ export default function LoginPanel({ onAuth }) {
   );
 }
 
-const lbl = { display:"block", fontSize:"12px", fontWeight:"600", color:"#333", marginBottom:"12px" };
+const lbl = { display:"block", fontSize:"12px", fontWeight:"600", color:"#344054", marginBottom:"12px" };
 const inp = {
-  display:"block", width:"100%", marginTop:"4px", padding:"9px 12px", borderRadius:"8px",
-  border:"1px solid #ccd5f0", fontSize:"14px"
+  display:"block", width:"100%", marginTop:"4px", padding:"9px 12px", borderRadius:"7px",
+  border:"1px solid #d0d5dd", fontSize:"14px", outline:"none"
 };

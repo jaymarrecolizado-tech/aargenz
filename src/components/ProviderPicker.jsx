@@ -8,18 +8,19 @@ export default function ProviderPicker({ aiOverrides, defaults, onChange }) {
       <select
         value={aiOverrides.AI_PROVIDER || defaults.AI_PROVIDER}
         onChange={e => onChange({ AI_PROVIDER: e.target.value })}
-        style={{padding:"5px 8px", borderRadius:"14px", border:"none", fontSize:"11px", fontWeight:"600", background:"rgba(255,255,255,0.15)", color:"#fff", cursor:"pointer", outline:"none"}}
+        className="hselect"
       >
-        <option value="auto" style={{color:"#111"}}>Auto</option>
-        <option value="local" style={{color:"#111"}}>Local</option>
-        <option value="groq" style={{color:"#111"}}>Groq</option>
+        <option value="auto">Auto</option>
+        <option value="local">Local</option>
+        <option value="groq">Groq</option>
       </select>
       <input
         value={aiOverrides.LOCAL_MODEL || defaults.LOCAL_MODEL}
         onChange={e => onChange({ LOCAL_MODEL: e.target.value })}
         placeholder="local model"
         title="Local model name served by your local server (e.g. qwen3:14b)"
-        style={{width:"110px", padding:"5px 8px", borderRadius:"14px", border:"none", fontSize:"11px", background:"rgba(255,255,255,0.15)", color:"#fff", outline:"none"}}
+        className="hselect"
+        style={{width:"110px"}}
       />
     </div>
   );
