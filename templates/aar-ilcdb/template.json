@@ -1,0 +1,220 @@
+{
+  "id": "aar-ilcdb",
+  "name": "ILCDB After Activity Report",
+  "version": 1,
+  "layout": "ilcdb",
+  "pdfTemplate": "Reference/ILCDB AAR TEMPLATE.pdf",
+  "headerLogo": "templates/aar-ilcdb/header-logo.png",
+  "footerLogo": "templates/aar-ilcdb/footer-logo.png",
+  "initialMessage": {
+    "role": "assistant",
+    "content": "Hello! I'll help you create your ILCDB **After Activity Report**. Let's start — what is the **course title**?"
+  },
+  "fields": [
+    {
+      "id": "courseTitle",
+      "label": "Course title",
+      "type": "text",
+      "example": "\"Artificial Intelligence (AI) Technology\""
+    },
+    {
+      "id": "courseCode",
+      "label": "Course code",
+      "type": "text",
+      "example": "\"ILCD-R2-AI-01\""
+    },
+    {
+      "id": "dateTime",
+      "label": "Date of the training",
+      "type": "text",
+      "example": "\"October 29-31, 2024\""
+    },
+    {
+      "id": "time",
+      "label": "Time of the training",
+      "type": "text",
+      "manual": true,
+      "example": "\"8:00am - 5:00pm\""
+    },
+    {
+      "id": "duration",
+      "label": "Duration of the training (hours/days)",
+      "type": "text",
+      "manual": true,
+      "example": "\"3 days (24 hours)\""
+    },
+    {
+      "id": "venue",
+      "label": "Venue of the training",
+      "type": "text",
+      "example": "\"DICT Region II Office, Tuguegarao City\""
+    },
+    {
+      "id": "courseOfficer",
+      "label": "Course Officer",
+      "type": "text",
+      "manual": true
+    },
+    {
+      "id": "adminAssistant",
+      "label": "Admin Assistant",
+      "type": "text",
+      "manual": true
+    },
+    {
+      "id": "technicalSupport",
+      "label": "Technical Support",
+      "type": "text",
+      "manual": true
+    },
+    {
+      "id": "resourcePerson",
+      "label": "Resource Person",
+      "type": "text"
+    },
+    {
+      "id": "platformUsed",
+      "label": "Platform used for the hands-on sessions",
+      "type": "text",
+      "example": "\"Google Colab\"",
+      "manual": true
+    },
+    {
+      "id": "mode",
+      "label": "Mode of delivery",
+      "type": "choice",
+      "options": [
+        "Face-to-Face",
+        "Online",
+        "Hybrid"
+      ],
+      "example": "\"Face-to-Face\", \"Online\" or \"Hybrid\""
+    },
+    {
+      "id": "targetParticipants",
+      "label": "Target participants",
+      "type": "text",
+      "example": "\"DICT Personnel\""
+    },
+    {
+      "id": "beneficiaries",
+      "label": "Number of attendees with sex disaggregation",
+      "type": "beneficiaries",
+      "sectionTitle": "Number of Beneficiary/ies with Sex Disaggregation",
+      "categories": [
+        {
+          "id": "ngas",
+          "label": "NGA"
+        },
+        {
+          "id": "lgus",
+          "label": "LGU"
+        },
+        {
+          "id": "sucs",
+          "label": "SUC"
+        },
+        {
+          "id": "others",
+          "label": "Others"
+        }
+      ]
+    },
+    {
+      "id": "certificatesIssued",
+      "label": "Total number of issued certificates (with submitted Evaluation Form/Output)",
+      "type": "text",
+      "manual": true,
+      "example": "\"17 (Male: 10, Female: 7)\""
+    },
+    {
+      "id": "rationale",
+      "label": "What was the course about?",
+      "target": "Rationale",
+      "type": "longform",
+      "styleNote": "Describe the course overview and what participants will learn. Write in formal, professional government report style (1-2 paragraphs)."
+    },
+    {
+      "id": "objectives",
+      "label": "What were the objectives of the course?",
+      "target": "Objectives",
+      "type": "longform",
+      "styleNote": "Write ONLY the bullet list of objectives, each line starting with '•', each ending in a semicolon except the last which ends in a period. Do NOT include the intro line 'Upon completion of the course, participants will be able to learn:' — the system prints that header itself."
+    },
+    {
+      "id": "topicsCovered",
+      "label": "What topics were covered and how were the sessions organized?",
+      "target": "Topics Covered",
+      "type": "longform",
+      "styleNote": "Start with a short overview of the modules covered, then summarize how the sessions were organized per day. Formal government report style."
+    },
+    {
+      "id": "issues",
+      "label": "Issues and concerns encountered during the training",
+      "type": "list",
+      "itemLabel": "Issue",
+      "collectNote": "For each issue/concern encountered during the training, collect a short description.",
+      "doneAccepted": true,
+      "itemFields": [
+        {
+          "id": "issue",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "recommendations",
+      "label": "Recommendations for future trainings",
+      "type": "list",
+      "itemLabel": "Recommendation",
+      "collectNote": "For each recommendation, ask what should be improved or done differently next time.",
+      "doneAccepted": true,
+      "itemFields": [
+        {
+          "id": "recommendation",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "plansActions",
+      "label": "What are the next steps / plans and action items?",
+      "target": "Plans and Action Items",
+      "type": "longform",
+      "styleNote": "Introduce with the context of the Program of Instruction, then list each action step as a bullet line starting with '•'. Formal government report style."
+    },
+    {
+      "id": "photoCaptions",
+      "label": "Photo captions (e.g. day labels)",
+      "type": "captions",
+      "manual": true
+    },
+    {
+      "id": "preparedBy",
+      "label": "Name and position of the person who prepared the report",
+      "type": "person",
+      "manual": true
+    },
+    {
+      "id": "notedBy",
+      "label": "Name and position of the person who will note the report",
+      "type": "person",
+      "manual": true
+    }
+  ],
+  "personnel": [
+    {
+      "name": "RICA V. CASUGA",
+      "position": "ILCDB, Project Development Officer II"
+    },
+    {
+      "name": "",
+      "position": ""
+    }
+  ],
+  "promptNotes": [
+    "This is an AFTER ACTIVITY REPORT for DICT Region II's ILCDB program (Information and Communications Technology literacy capacity development trainings).",
+    "Objectives are collected as one answer — write them as separate bullet lines starting with '•'.",
+    "Issues and Concerns and Recommendations are two SEPARATE lists — never mix them into one."
+  ]
+}

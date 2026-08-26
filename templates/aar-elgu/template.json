@@ -10,10 +10,29 @@
     "content": "Hello! I'll help you create your Accomplishment Activity Report. Let's start — what is the **title of the activity**?"
   },
   "fields": [
-    { "id": "title", "label": "Activity title", "type": "text" },
-    { "id": "dateTime", "label": "Date and time", "type": "text", "example": "\"December 2-3, 2025 | 9:00am - 5:00pm\"" },
-    { "id": "mode", "label": "Mode/Platform/Location", "type": "text", "example": "\"Face-to-Face\" or \"Online via Zoom\"" },
-    { "id": "controlNo", "label": "Control number", "type": "text", "example": "\"eLGU-R2-12-04-2025-S157\"" },
+    {
+      "id": "title",
+      "label": "Activity title",
+      "type": "text"
+    },
+    {
+      "id": "dateTime",
+      "label": "Date and time",
+      "type": "text",
+      "example": "\"December 2-3, 2025 | 9:00am - 5:00pm\""
+    },
+    {
+      "id": "mode",
+      "label": "Mode/Platform/Location",
+      "type": "text",
+      "example": "\"Face-to-Face\" or \"Online via Zoom\""
+    },
+    {
+      "id": "controlNo",
+      "label": "Control number",
+      "type": "text",
+      "example": "\"eLGU-R2-12-04-2025-S157\""
+    },
     {
       "id": "facilitators",
       "label": "DICT Facilitators",
@@ -22,9 +41,19 @@
       "collectNote": "Ask how many facilitators first, then collect each one (Name, Office, Gender M/F).",
       "doneAccepted": true,
       "itemFields": [
-        { "id": "name", "type": "text" },
-        { "id": "office", "type": "text" },
-        { "id": "gender", "type": "text", "example": "M/F" }
+        {
+          "id": "name",
+          "type": "text"
+        },
+        {
+          "id": "office",
+          "type": "text"
+        },
+        {
+          "id": "gender",
+          "type": "text",
+          "example": "M/F"
+        }
       ]
     },
     {
@@ -33,10 +62,22 @@
       "type": "beneficiaries",
       "sectionTitle": "NGAs / LGUs / SUCs and other Beneficiaries",
       "categories": [
-        { "id": "ngas", "label": "NGAs" },
-        { "id": "lgus", "label": "LGUs" },
-        { "id": "sucs", "label": "SUCs" },
-        { "id": "others", "label": "Others" }
+        {
+          "id": "ngas",
+          "label": "NGAs"
+        },
+        {
+          "id": "lgus",
+          "label": "LGUs"
+        },
+        {
+          "id": "sucs",
+          "label": "SUCs"
+        },
+        {
+          "id": "others",
+          "label": "Others"
+        }
       ]
     },
     {
@@ -53,13 +94,32 @@
       "type": "longform",
       "styleNote": "Write in formal, professional government report style (2-3 paragraphs)"
     },
-    { "id": "preparedBy", "label": "Name and position of the person who prepared the report", "type": "person", "manual": true },
-    { "id": "conformedBy", "label": "Name and position of the person who will conform/approve the report", "type": "person", "manual": true }
+    {
+      "id": "preparedBy",
+      "label": "Name and position of the person who prepared the report",
+      "type": "person",
+      "manual": true
+    },
+    {
+      "id": "conformedBy",
+      "label": "Name and position of the person who will conform/approve the report",
+      "type": "person",
+      "manual": true
+    }
   ],
   "personnel": [
-    { "name": "JUAN D. DELA CRUZ", "position": "Regional Director" },
-    { "name": "JUANA S. SANTOS", "position": "Provincial Officer" },
-    { "name": "", "position": "" }
+    {
+      "name": "JUAN D. DELA CRUZ",
+      "position": "Regional Director"
+    },
+    {
+      "name": "JUANA S. SANTOS",
+      "position": "Provincial Officer"
+    },
+    {
+      "name": "",
+      "position": ""
+    }
   ],
   "promptNotes": []
 }

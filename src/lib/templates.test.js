@@ -64,6 +64,62 @@ describe("buildSystemPrompt", () => {
   });
 });
 
+describe("buildSystemPrompt ALREADY PROVIDED section", () => {
+  const tpl = {
+    id: "t-manual",
+    name: "Manual Aware Report",
+    fields: [
+      { id: "title", label: "Activity title", type: "text" },
+      { id: "venue", label: "Venue", type: "text", manual: true },
+      { id: "preparedBy", label: "Prepared by", type: "person", manual: true },
+      { id: "facilitators", label: "Facilitators", type: "list", itemFields: [{ id: "name", type: "text" }, { id: "office", type: "text" }] },
+      { id: "ben", label: "Beneficiary breakdown", type: "beneficiaries", categories: [{ id: "ngas", label: "NGAs" }] }
+    ]
+  };
+
+  it("lists hand-edited values and forbids re-asking", () => {
+    const prompt = buildSystemPrompt(tpl, {
+      title: "",
+      venue: "DICT Regional Office",
+      preparedBy: { name: "Rica V. Casuga", position: "Chief" },
+      facilitators: [{ name: "Ana Reyes", office: "DICT" }],
+      ben: { ngas: { male: 3, female: 4 } }
+    });
+    expect(prompt).toContain("ALREADY PROVIDED");
+    expect(prompt).toContain("- Venue: DICT Regional Office");
+    expect(prompt).toContain("- Prepared by: Rica V. Casuga (Chief)");
+    expect(prompt).toContain("- Facilitators: Ana Reyes, DICT");
+    expect(prompt).toContain("- Beneficiary breakdown: ngas: 3 male / 4 female");
+    expect(prompt).toMatch(/NEVER ask/i);
+  });
+
+  it("skips empty values but keeps partially filled ones", () => {
+    const prompt = buildSystemPrompt(tpl, {
+      title: "",
+      venue: "",
+      preparedBy: { name: "", position: "" },
+      ben: { ngas: { male: 0, female: 2 } }
+    });
+    expect(prompt).toContain("ALREADY PROVIDED");
+    expect(prompt).toContain("ngas: 0 male / 2 female");
+    expect(prompt).not.toContain("- Activity title:");
+    expect(prompt).not.toContain("- Venue:");
+    expect(prompt).not.toContain("- Prepared by:");
+  });
+
+  it("omits the section entirely when nothing is filled", () => {
+    expect(buildSystemPrompt(tpl, {})).not.toContain("ALREADY PROVIDED");
+    expect(buildSystemPrompt(tpl)).not.toContain("ALREADY PROVIDED");
+    expect(buildSystemPrompt(tpl, null)).not.toContain("ALREADY PROVIDED");
+  });
+
+  it("caps very long values", () => {
+    const long = "x".repeat(500);
+    const prompt = buildSystemPrompt({ ...tpl, fields: [tpl.fields[0]] }, { title: long });
+    expect(prompt).toContain("x".repeat(300) + "…");
+  });
+});
+
 describe("buildJsonSchemaExample", () => {
   it("omits manual person fields but keeps AI-collected ones", () => {
     const json = JSON.parse(buildJsonSchemaExample(builtinAar));

@@ -1,6 +1,8 @@
 {
   "templates": [
     "aar-elgu",
-    "freewifi"
+    "aar-egov",
+    "freewifi",
+    "aar-ilcdb"
   ]
 }

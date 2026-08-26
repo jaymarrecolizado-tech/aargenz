@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
 import { countGenders } from "../lib/report.js";
+import EgovPreview from "./EgovPreview.jsx";
+import IlcdbPreview from "./IlcdbPreview.jsx";
 
 // Photo slot with a remove (✕) button when onRemove is provided.
 function PhotoSlot({ src, index, onRemove }) {
@@ -14,7 +16,16 @@ function PhotoSlot({ src, index, onRemove }) {
   );
 }
 
-export default function ReportPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFacilitator, onRemovePhoto, headerImg, footerImg, template, photoLayout = "classic", onLayoutChange }) {
+// Dispatcher: templates with their own layout render through their own
+// preview component. Kept hookless so switching templates can never
+// re-order the classic layout's hooks.
+export default function ReportPreview(props) {
+  if (props.template?.layout === "egov") return <EgovPreview {...props}/>;
+  if (props.template?.layout === "ilcdb") return <IlcdbPreview {...props}/>;
+  return <ClassicPreview {...props}/>;
+}
+
+function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFacilitator, onRemovePhoto, headerImg, footerImg, template, photoLayout = "classic", onLayoutChange }) {
   const [editField, setEditField] = useState(null);
   const [editValue, setEditValue] = useState("");
   const [editDeep, setEditDeep] = useState(null);

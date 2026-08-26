@@ -13,12 +13,36 @@ import { loadSavedState, saveState, clearState } from "./lib/storage.js";
 import { compressImage } from "./lib/images.js";
 import { MAX_PHOTOS, loadSavedLayout, saveLayout } from "./lib/collage.js";
 import { loadGallery, addToGallery, HEADER_GALLERY_KEY, FOOTER_GALLERY_KEY } from "./lib/presets.js";
-import { HEADER_IMG, FOOTER_IMG } from "./lib/assets.js";
 import { api } from "./lib/api.js";
 import {
   fetchTemplates, getTemplate, getBuiltinTemplate,
   buildSystemPrompt, loadSavedTemplateId, saveTemplateId
 } from "./lib/templates.js";
+
+// Per-project header/footer overrides (user's own picks), persisted in the
+// browser. Keyed by template id so each project keeps its own header/footer:
+//   { [templateId]: { header?: string, footer?: string } }
+// A string is a data-URL (or "" for explicitly no image); a missing key means
+// "use the admin-set project default".
+const BRANDING_KEY = "aar-branding-overrides";
+
+const loadBrandingOverrides = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(BRANDING_KEY) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+};
+
+// value: data-URL string, "" (explicit blank), or null (remove → use project default)
+const saveBrandingOverride = (templateId, kind, value) => {
+  const all = loadBrandingOverrides();
+  const cur = { ...(all[templateId] || {}) };
+  if (value === null) delete cur[kind];
+  else cur[kind] = value;
+  if (Object.keys(cur).length) all[templateId] = cur;
+  else delete all[templateId];
+  try { localStorage.setItem(BRANDING_KEY, JSON.stringify(all)); } catch { /* storage full */ }
+};
 
 const SAVED_STATE = loadSavedState();
 
@@ -37,6 +61,15 @@ const setDeep = (root, keys, value) => {
 // Hides the model's ```json progress blocks (Phase 7.3) from chat display.
 const stripFences = (t) => String(t || "").replace(/```(?:json)?[\s\S]*?```/gi, "").trim();
 
+// True when a stored field value carries any real content (recurses into
+// arrays/objects so blank scaffolding like {name:"",position:""} is empty).
+const hasContent = (v) => {
+  if (v === undefined || v === null || v === "") return false;
+  if (Array.isArray(v)) return v.some(hasContent);
+  if (typeof v === "object") return Object.values(v).some(hasContent);
+  return String(v).trim() !== "";
+};
+
 export default function App() {
   const [tab, setTab] = useState("chat");
   // undefined = still checking the session; null = logged out; object = user.
@@ -47,7 +80,6 @@ export default function App() {
   const [templateId, setTemplateId] = useState(SAVED_STATE?.templateId || loadSavedTemplateId() || "aar-elgu");
   // Active template: server registry once loaded, bundled default before that.
   const template = getTemplate(templates || [getBuiltinTemplate("aar-elgu")], templateId);
-  const systemPrompt = buildSystemPrompt(template);
   const initialMessage = template.initialMessage || { role: "assistant", content: "Hello! Let's start — what is the **title of the activity**?" };
   const [messages, setMessages] = useState(SAVED_STATE?.messages?.length ? SAVED_STATE.messages : [initialMessage]);
   const [input, setInput] = useState("");
@@ -56,8 +88,8 @@ export default function App() {
   const [reportData, setReportData] = useState(SAVED_STATE?.reportData ? normalizeReport(SAVED_STATE.reportData, template) : null);
   const [photos, setPhotos] = useState([]);
   const [photoLayout, setPhotoLayout] = useState(SAVED_STATE?.photoLayout || loadSavedLayout());
-  const [headerImgData, setHeaderImgData] = useState(HEADER_IMG);
-  const [footerImgData, setFooterImgData] = useState(FOOTER_IMG);
+  const [headerImgData, setHeaderImgData] = useState("");
+  const [footerImgData, setFooterImgData] = useState("");
   const [aiOverrides, setAiOverrides] = useState(loadAiOverrides());
   // Phase 7.4: artifact-style live preview next to the chat.
   const [splitView, setSplitView] = useState(() => {
@@ -68,12 +100,25 @@ export default function App() {
   const fileRef = useRef(null);
   const headerRef = useRef(null);
   const footerRef = useRef(null);
+  // Top-level field ids the user filled by hand in the preview (not via chat).
+  // Drives two behaviors: the system prompt's ALREADY PROVIDED list keeps the
+  // assistant from re-asking, and completion merges keep hand edits from being
+  // wiped when the model emits its final report JSON.
+  const manualEditsRef = useRef(new Set());
+  const markManualEdit = (path) => { manualEditsRef.current.add(String(path).split(".")[0]); };
+  const resetManualEdits = () => { manualEditsRef.current = new Set(); };
 
-  // Applies a template's default header/footer branding (Phase 8.4). Manual
-  // picks in the top bar win until the template changes again.
+  // Chat system prompt, rebuilt whenever the report changes so the assistant
+  // always sees what is already filled in the live preview.
+  const systemPrompt = buildSystemPrompt(template, reportData);
+
+  // Applies a template's branding (Phase 8.4): the admin-set project default
+  // (headerLogo/footerLogo) unless the user picked their own header/footer for
+  // this project (persisted override), which then wins.
   const applyBranding = (tpl) => {
-    setHeaderImgData(tpl?.headerLogo || HEADER_IMG);
-    setFooterImgData(tpl?.footerLogo || FOOTER_IMG);
+    const ov = ((tpl && loadBrandingOverrides()[tpl.id]) || {});
+    setHeaderImgData(ov.header !== undefined ? ov.header : (tpl?.headerLogo || ""));
+    setFooterImgData(ov.footer !== undefined ? ov.footer : (tpl?.footerLogo || ""));
   };
 
   // Load the server-side template registry on mount.
@@ -143,6 +188,7 @@ export default function App() {
     saveTemplateId(tpl.id);
     setTemplateId(tpl.id);
     applyBranding(tpl);
+    resetManualEdits();
     setMessages(full.conversation?.length ? full.conversation : [tpl.initialMessage || initialMessage]);
     setReportData(full.report ? normalizeReport(full.report, tpl) : null);
     setPhotos(Array.isArray(full.photos) ? full.photos : []);
@@ -154,6 +200,7 @@ export default function App() {
     try { await api.logout(); } catch { /* ignore */ }
     clearState();
     setUser(null);
+    resetManualEdits();
     setMessages([initialMessage]);
     setReportData(null);
     setPhotos([]);
@@ -169,6 +216,7 @@ export default function App() {
     const next = getTemplate(templates || [getBuiltinTemplate("aar-elgu")], id);
     applyBranding(next);
     clearState();
+    resetManualEdits();
     setMessages([next.initialMessage || initialMessage]);
     setReportData(null);
     setPhotos([]);
@@ -181,6 +229,7 @@ export default function App() {
     if (!window.confirm("Start a new report? This clears the current conversation and report.")) return;
     applyBranding(template);
     clearState();
+    resetManualEdits();
     setMessages([initialMessage]);
     setReportData(null);
     setPhotos([]);
@@ -202,8 +251,10 @@ export default function App() {
     if (file) {
       const reader = new FileReader();
       reader.onload = ev => {
-        setHeaderImgData(ev.target.result);
-        if (ev.target.result) setHeaderGallery(addToGallery(HEADER_GALLERY_KEY, ev.target.result));
+        const src = ev.target.result || "";
+        setHeaderImgData(src);
+        saveBrandingOverride(template.id, "header", src);
+        if (src) setHeaderGallery(addToGallery(HEADER_GALLERY_KEY, src));
       };
       reader.readAsDataURL(file);
     }
@@ -214,12 +265,36 @@ export default function App() {
     if (file) {
       const reader = new FileReader();
       reader.onload = ev => {
-        setFooterImgData(ev.target.result);
-        if (ev.target.result) setFooterGallery(addToGallery(FOOTER_GALLERY_KEY, ev.target.result));
+        const src = ev.target.result || "";
+        setFooterImgData(src);
+        saveBrandingOverride(template.id, "footer", src);
+        if (src) setFooterGallery(addToGallery(FOOTER_GALLERY_KEY, src));
       };
       reader.readAsDataURL(file);
     }
   };
+
+  // User picks a header/footer from the gallery dropdown. "__default" restores
+  // the admin-set project image; "__none" explicitly blanks the area.
+  const pickHeaderFromGallery = (value) => {
+    if (value === "__default") resetHeaderToProject();
+    else if (value === "__none") { saveBrandingOverride(template.id, "header", ""); setHeaderImgData(""); }
+    else if (value) { saveBrandingOverride(template.id, "header", value); setHeaderImgData(value); }
+  };
+  const pickFooterFromGallery = (value) => {
+    if (value === "__default") resetFooterToProject();
+    else if (value === "__none") { saveBrandingOverride(template.id, "footer", ""); setFooterImgData(""); }
+    else if (value) { saveBrandingOverride(template.id, "footer", value); setFooterImgData(value); }
+  };
+
+  // Reverts a user override so the admin-set project logo is used again.
+  const resetHeaderToProject = () => { saveBrandingOverride(template.id, "header", null); applyBranding(template); };
+  const resetFooterToProject = () => { saveBrandingOverride(template.id, "footer", null); applyBranding(template); };
+
+  // True when the currently shown image is the user's own pick, not the
+  // admin-set project default (so we can show a "↺ reset" control).
+  const headerIsCustom = headerImgData && headerImgData !== (template?.headerLogo || "");
+  const footerIsCustom = footerImgData && footerImgData !== (template?.footerLogo || "");
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
@@ -249,7 +324,22 @@ export default function App() {
           const normalized = normalizeReport(progress, template);
           const errors = validateReportSchema(normalized, template);
           if (!errors.length) {
-            setReportData(normalized);
+            // The model's JSON never contains preview-only/manual fields, and
+            // hand edits in the preview may be newer than the chat transcript —
+            // so re-apply manual-field values plus anything the user edited by
+            // hand before storing the final data.
+            setReportData(prev => {
+              const preserved = {};
+              for (const f of template.fields || []) {
+                if (f.manual && hasContent(prev?.[f.id])) preserved[f.id] = prev[f.id];
+              }
+              for (const id of manualEditsRef.current) {
+                if (hasContent(prev?.[id])) preserved[id] = prev[id];
+              }
+              return Object.keys(preserved).length
+                ? normalizeReport(mergeProgress(normalized, preserved), template)
+                : normalized;
+            });
             setMessages(prev => [...prev, {
               role: "assistant",
               content: stripFences(text) + "\n\n✅ **Report data collected!** Click the **Preview Report** tab to see your formatted AAR. Don't forget to upload photos!"
@@ -344,10 +434,12 @@ export default function App() {
   const updateReportData = (field, value) => {
     // Supports dotted paths into nested objects and arrays, e.g.
     // "preparedBy.name", "facilitators.0.office", "beneficiaries.ngas.male".
+    markManualEdit(field);
     setReportData(prev => setDeep(prev ?? {}, field.split("."), value));
   };
 
   const addFacilitator = () => {
+    markManualEdit("facilitators");
     setReportData(prev => ({
       ...(prev || {}),
       facilitators: [...(prev?.facilitators || []), { name: "", office: "", gender: "" }]
@@ -355,6 +447,7 @@ export default function App() {
   };
 
   const removeFacilitator = (index) => {
+    markManualEdit("facilitators");
     setReportData(prev => ({
       ...(prev || {}),
       facilitators: (prev?.facilitators || []).filter((_, i) => i !== index)
@@ -428,27 +521,37 @@ export default function App() {
             </>
           )}
           <TemplatePicker templates={templates} templateId={template.id} onChange={handleSelectTemplate}/>
-          <ProviderPicker aiOverrides={aiOverrides} defaults={AI_DEFAULTS} onChange={updateAiOverrides}/>
-          <button onClick={() => headerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:headerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"8px"}}>
+          {user?.role === "admin" && <ProviderPicker aiOverrides={aiOverrides} defaults={AI_DEFAULTS} onChange={updateAiOverrides}/>}
+          <button onClick={() => headerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:headerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"8px"}} title="Upload your own header for this project">
             {headerImgData?"✓ Header":"📄 Header"}
           </button>
-          {headerGallery.length > 0 && (
-            <select title="Pick a saved header" value="" onChange={e => e.target.value && setHeaderImgData(e.target.value)}
-              style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}>
-              <option value="">Header ▾</option>
-              {headerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
-            </select>
+          {headerIsCustom && (
+            <button onClick={resetHeaderToProject} title="Reset to this project's default header (set by admin)" style={{padding:"5px 8px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", background:"rgba(255,255,255,0.15)", color:"#fff"}}>↺</button>
           )}
-          <button onClick={() => footerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:footerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"4px"}}>
+          <select title="Header options" value="" onChange={e => { if (e.target.value) pickHeaderFromGallery(e.target.value); }}
+            style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}>
+            <option value="">Header ▾</option>
+            <option value="__default">Project header (admin)</option>
+            <option value="__none">No header</option>
+            {headerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
+          </select>
+          <button onClick={() => footerRef.current?.click()} style={{padding:"5px 12px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"11px", background:footerImgData?"#4CAF50":"rgba(255,255,255,0.15)", color:"#fff", marginLeft:"4px"}} title="Pick your own footer for this project">
             {footerImgData?"✓ Footer":"📄 Footer"}
           </button>
-          {footerGallery.length > 0 && (
-            <select title="Pick a saved footer" value="" onChange={e => e.target.value && setFooterImgData(e.target.value)}
-              style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}>
-              <option value="">Footer ▾</option>
-              {footerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
-            </select>
+          {footerIsCustom && (
+            <button onClick={resetFooterToProject} title="Reset to this project's default footer (set by admin)" style={{padding:"5px 8px", borderRadius:"20px", border:"none", cursor:"pointer", fontSize:"12px", background:"rgba(255,255,255,0.15)", color:"#fff"}}>↺</button>
           )}
+          <select
+            title="Footer — project default or your own"
+            value=""
+            onChange={e => { if (e.target.value) pickFooterFromGallery(e.target.value); }}
+            style={{fontSize:"11px", padding:"4px 6px", borderRadius:"12px", border:"none", cursor:"pointer"}}
+          >
+            <option value="">Footer ▾</option>
+            <option value="__default">Project footer (admin)</option>
+            <option value="__none">No footer</option>
+            {footerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
+          </select>
           <span title={syncState === "error" ? "Could not reach the server — your work is still saved in this browser" : "Draft sync status"} style={{
             fontSize:"11px", color: syncState === "error" ? "#ff9999" : "rgba(255,255,255,0.6)", marginLeft:"6px", minWidth:"52px"
           }}>

@@ -1,0 +1,196 @@
+{
+  "id": "aar-egov",
+  "name": "eGov PH Post-Event Report",
+  "version": 1,
+  "layout": "egov",
+  "headerLogo": "",
+  "footerLogo": "",
+  "initialMessage": {
+    "role": "assistant",
+    "content": "Hello! I'll help you create your eGov **Post-Event Report**. Let's start — what is the **name of the event**?"
+  },
+  "fields": [
+    {
+      "id": "eventName",
+      "label": "Name of event",
+      "type": "text",
+      "example": "\"LAB FOR ALL Program\""
+    },
+    {
+      "id": "dateTime",
+      "label": "Date and time of the event",
+      "type": "text",
+      "example": "\"February 10, 2026 | 8:00am\""
+    },
+    {
+      "id": "location",
+      "label": "Venue / location of the event",
+      "type": "text",
+      "example": "\"Paranaque Sports and Social Hall, Paranaque City\""
+    },
+    {
+      "id": "representatives",
+      "label": "eGov team representatives who attended",
+      "type": "list",
+      "itemLabel": "Representative",
+      "collectNote": "Ask how many representatives attended first, then collect each name.",
+      "doneAccepted": true,
+      "itemFields": [
+        {
+          "id": "name",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "timeOfArrival",
+      "label": "Time of arrival at the venue",
+      "type": "text",
+      "manual": true,
+      "example": "\"7:30am\""
+    },
+    {
+      "id": "estimatedParticipants",
+      "label": "Estimated number of participants",
+      "type": "text",
+      "example": "\"around 300\""
+    },
+    {
+      "id": "totalRegistrants",
+      "label": "Total number of registrants",
+      "type": "text",
+      "example": "\"254\""
+    },
+    {
+      "id": "docsSubmitted",
+      "label": "Were video and photo documentations submitted?",
+      "type": "choice",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "example": "\"Yes\" or \"No\""
+    },
+    {
+      "id": "overview",
+      "label": "What happened at the event?",
+      "target": "Overview",
+      "type": "longform",
+      "styleNote": "Write a brief description of the event including its purpose, key highlights, and how the eGov team was formally invited to participate and support the activity. Include the number of new eGovPH app downloads if mentioned. Formal, professional government report style (2-3 paragraphs)."
+    },
+    {
+      "id": "challenges",
+      "label": "Issues encountered and recommendations",
+      "type": "list",
+      "itemLabel": "Challenge",
+      "collectNote": "For each issue/concern/problem encountered, also ask what recommendation would improve future events. Collect at least one pair.",
+      "doneAccepted": true,
+      "itemFields": [
+        {
+          "id": "issue",
+          "type": "text"
+        },
+        {
+          "id": "recommendation",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "materials",
+      "label": "eGovPH material condition",
+      "type": "matrix",
+      "manual": true,
+      "rows": [
+        {
+          "id": "booth",
+          "label": "Collapsible Booth"
+        },
+        {
+          "id": "banners",
+          "label": "Roll Up Banners"
+        },
+        {
+          "id": "qr",
+          "label": "Handheld QR Codes"
+        },
+        {
+          "id": "standee",
+          "label": "Countertop Standee"
+        }
+      ],
+      "scales": [
+        {
+          "id": "pre",
+          "label": "Pre-event"
+        },
+        {
+          "id": "post",
+          "label": "Post-event"
+        }
+      ],
+      "options": [
+        {
+          "id": "good",
+          "label": "Good"
+        },
+        {
+          "id": "fair",
+          "label": "Fair"
+        },
+        {
+          "id": "poor",
+          "label": "Poor"
+        }
+      ],
+      "legend": [
+        "Good Condition - Materials are usable, complete, and fully functional",
+        "Fair Condition - Materials are usable but with minor issues",
+        "Poor Condition - Materials are barely usable"
+      ],
+      "note": "Provide photo for damaged materials."
+    },
+    {
+      "id": "photoCaptions",
+      "label": "Photo captions",
+      "type": "captions",
+      "manual": true
+    },
+    {
+      "id": "preparedBy",
+      "label": "Name and position of the person who prepared the report",
+      "type": "person",
+      "manual": true
+    },
+    {
+      "id": "reviewedBy",
+      "label": "Name and position of the person who reviewed the report",
+      "type": "person",
+      "manual": true
+    },
+    {
+      "id": "approvedBy",
+      "label": "Name and position of the person who approved the report",
+      "type": "person",
+      "manual": true
+    }
+  ],
+  "personnel": [
+    {
+      "name": "JOYCE ANN P. URDILLAS",
+      "position": "Project Development Officer II"
+    },
+    {
+      "name": "ENGR. RONALD S. BARIUAN",
+      "position": "eGov Focal/eGov Alternate Focal"
+    },
+    {
+      "name": "",
+      "position": ""
+    }
+  ],
+  "promptNotes": [
+    "This is a POST-EVENT REPORT for the eGov PH program (eGovPH app promotion).",
+    "For the challenges list, always collect the issue AND its proposed recommendation together."
+  ]
+}

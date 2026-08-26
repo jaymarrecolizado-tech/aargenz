@@ -100,7 +100,7 @@ function readKeys(prefix) {
 }
 
 // ---- Template config management (Phase 8.3) ------------------------------
-const VALID_FIELD_TYPES = ["text", "longform", "list", "beneficiaries", "person"];
+const VALID_FIELD_TYPES = ["text", "longform", "list", "beneficiaries", "person", "choice", "matrix", "captions"];
 
 function validateTemplateConfig(tpl) {
   if (!tpl || typeof tpl !== "object" || Array.isArray(tpl)) return ["Template must be an object"];

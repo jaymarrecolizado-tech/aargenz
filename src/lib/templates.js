@@ -71,8 +71,15 @@ const jsonExampleForField = (field) => {
       }), {});
     case "person":
       return { name: "", position: "" };
+    case "matrix":
+      // Manual in practice, but a valid example keeps ad-hoc templates safe.
+      return (field.rows || []).reduce((acc, r) => ({
+        ...acc, [r.id]: (field.scales || []).reduce((a, s) => ({ ...a, [s.id]: "" }), {})
+      }), {});
+    case "captions":
+      return [];
     default:
-      return "";
+      return ""; // text, longform, choice
   }
 };
 
@@ -85,10 +92,64 @@ export const buildJsonSchemaExample = (template) =>
     2
   ).split("\n").map((l, i) => (i ? "    " : "") + l).join("\n");
 
+// Compact human-readable rendering of a stored field value for the
+// "ALREADY PROVIDED" system-prompt section. Returns null when empty.
+export const describeFieldValue = (field, value) => {
+  if (value === null || value === undefined) return null;
+  const cap = (s) => {
+    s = String(s).trim();
+    return s.length > 300 ? s.slice(0, 300) + "…" : s;
+  };
+  switch (field?.type) {
+    case "person": {
+      const name = String(value.name || "").trim();
+      if (!name) return null;
+      const pos = String(value.position || "").trim();
+      return cap(pos ? `${name} (${pos})` : name);
+    }
+    case "list": {
+      if (!Array.isArray(value)) return null;
+      const rows = value.map(it =>
+        (field.itemFields || []).map(sf => String(it?.[sf.id] ?? "").trim()).filter(Boolean).join(", ")
+      ).filter(Boolean);
+      return rows.length ? cap(rows.join("; ")) : null;
+    }
+    case "beneficiaries": {
+      if (!value || typeof value !== "object") return null;
+      const parts = Object.entries(value).map(([cid, counts]) => {
+        const m = Number(counts?.male ?? 0), f = Number(counts?.female ?? 0);
+        return (m || f) ? `${cid}: ${m} male / ${f} female` : null;
+      }).filter(Boolean);
+      return parts.length ? cap(parts.join("; ")) : null;
+    }
+    case "matrix": {
+      if (!value || typeof value !== "object") return null;
+      const parts = Object.entries(value).flatMap(([row, scales]) =>
+        Object.entries(scales || {})
+          .filter(([, v]) => String(v ?? "").trim() !== "")
+          .map(([scale, v]) => `${row}.${scale}=${v}`));
+      return parts.length ? cap(parts.join("; ")) : null;
+    }
+    case "captions": {
+      if (!Array.isArray(value)) return null;
+      const caps = value.map(c => String(c || "").trim()).filter(Boolean);
+      return caps.length ? cap(caps.join(" | ")) : null;
+    }
+    default: {
+      const s = String(typeof value === "string" ? value.trim() : value ?? "");
+      return s ? cap(s) : null;
+    }
+  }
+};
+
 // Generates the chat system prompt for a template from its field list.
-export const buildSystemPrompt = (template) => {
+// `reportData` (optional) is the current report state: anything already filled
+// there — by the chat or by the user editing the preview directly — is listed
+// in an "ALREADY PROVIDED" section so the assistant never asks for it again.
+export const buildSystemPrompt = (template, reportData = null) => {
   const fields = chatFields(template);
   const lines = [];
+  lines.push(`You are "Vantage" — one of All Father JE Lite's Creations. Always present yourself as Vantage by name, both when you greet the user and whenever you ask a question or give an answer.`);
   lines.push(`You are an assistant helping fill out an ${template.name} for DICT (Department of Information and Communications Technology) Philippines.`);
   lines.push("");
   lines.push("Your job is to collect information through a friendly conversation, ONE question at a time. Ask the next question only after getting an answer.");
@@ -106,9 +167,29 @@ export const buildSystemPrompt = (template) => {
       case "longform":
         push(f.label, `for ${f.target} - you will write the formal ${f.target.toLowerCase()} based on their answer`);
         break;
+      case "choice":
+        push(f.label, `answer with exactly one of: ${(f.options || ["Yes", "No"]).join(" / ")}`);
+        break;
       default:
         push(f.label, f.example ? `e.g. ${f.example}` : undefined);
     }
+  }
+
+  // Fields already holding a value (chat answers or direct preview edits):
+  // listed so the assistant skips them instead of asking again.
+  const filled = [];
+  if (reportData && typeof reportData === "object") {
+    for (const f of template.fields || []) {
+      const text = describeFieldValue(f, reportData[f.id]);
+      if (text) filled.push(`- ${f.label}: ${text}`);
+    }
+  }
+  if (filled.length) {
+    lines.push("");
+    lines.push("ALREADY PROVIDED — do NOT ask about these again:");
+    lines.push("The user has already given the following, either earlier in this chat or by editing the report preview directly. Treat every entry below as fully collected and NEVER ask for it again:");
+    lines.push(...filled);
+    lines.push("For entries above that belong to your numbered collection list, copy their exact current value into your progress JSON block (they count as collected toward completion). Entries that belong to preview-only fields not in your collection list must NOT appear in your JSON.");
   }
 
   lines.push("");

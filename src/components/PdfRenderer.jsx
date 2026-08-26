@@ -11,7 +11,13 @@ export const escapeHtml = (value) => String(value ?? "")
   .replace(/"/g, "&quot;")
   .replace(/'/g, "&#039;");
 
-export const buildFooterLabel = (data) => {
+export const buildFooterLabel = (data, template) => {
+  if (template?.layout === "egov") {
+    return `Post-Event Report${data.eventName ? ` | ${escapeHtml(data.eventName)}` : ""}`;
+  }
+  if (template?.layout === "ilcdb") {
+    return `After Activity Report${data.courseTitle ? ` | ${escapeHtml(data.courseTitle)}` : ""}`;
+  }
   const title = data.title || "";
   const date = (data.dateTime || "").split("|")[0]?.trim() || "";
   return `[${escapeHtml(title)} on ${escapeHtml(date)}]`;
@@ -24,7 +30,232 @@ const beneficiaryFieldOf = (template) =>
 const personIds = (template) =>
   new Set((template?.fields || []).filter(f => f.type === "person").map(f => f.id));
 
+// -------------------------------------------------------------------------
+// eGov PH Post-Event Report (layout: "egov") — PDF blocks. Emits the same
+// block vocabulary as the classic builder so the A4 pagination engine
+// (measure → fit → split tables/photo-grids across pages) works unchanged.
+// -------------------------------------------------------------------------
+const buildEgovPdfBlocks = (data, photos, headerImgData, template, photoLayout = "classic") => {
+  const fieldOf = (id) => (template?.fields || []).find(f => f.id === id);
+  const cell = value => escapeHtml(value || "");
+  const img = src => src ? escapeHtml(src) : "";
+  const paras = value => String(value || "")
+    .split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const styleAttr = (obj) => Object.entries(obj).map(([k, v]) => `${k.replace(/[A-Z]/g, c => "-" + c.toLowerCase())}:${v}`).join(";");
+  const blocks = [];
+
+  if (headerImgData) {
+    blocks.push(`<img class="pdf-header-img" src="${img(headerImgData)}" alt="header">`);
+  }
+
+  blocks.push(`<div style="text-align:center;font-weight:bold;font-size:14pt;letter-spacing:1px;margin:2mm 0 4mm">POST-EVENT REPORT</div>`);
+
+  const reps = (data.representatives || []).map(r => (r?.name || "").trim()).filter(Boolean);
+  blocks.push(`<table class="info-table"><tbody>
+    <tr><th>Name of Event</th><td colspan="3">${cell(data.eventName)}</td></tr>
+    <tr><th>Date/Time</th><td colspan="3"><strong>${cell(data.dateTime)}</strong></td></tr>
+    <tr><th>Location</th><td colspan="3">${cell(data.location)}</td></tr>
+    <tr><th>Time of Arrival</th><td>${cell(data.timeOfArrival)}</td><th>Estimated No. of Participants</th><td>${cell(data.estimatedParticipants)}</td></tr>
+    <tr><th>Representative/s</th><td>${reps.map((r, i) => `${i + 1}. ${cell(r)}`).join("<br>")}</td><th>Total No. of Registrants</th><td>${cell(data.totalRegistrants)}</td></tr>
+    <tr><th>Submitted Video and Photo Documentations?</th><td colspan="3">${data.docsSubmitted === "Yes" ? "● Yes &nbsp;&nbsp; ○ No" : data.docsSubmitted === "No" ? "○ Yes &nbsp;&nbsp; ● No" : ""}</td></tr>
+  </tbody></table>`);
+
+  blocks.push(`<h2>I. <span>OVERVIEW</span></h2>`);
+  paras(data.overview).forEach(par => blocks.push(`<div class="para"><p>${cell(par)}</p></div>`));
+
+  blocks.push(`<h2>II. <span>CHALLENGES &amp; RECOMMENDATION</span></h2>`);
+  const chRows = (data.challenges || []).map(c =>
+    `<tr><td>${cell(c?.issue)}</td><td>${cell(c?.recommendation)}</td></tr>`
+  ).join("");
+  blocks.push(`<table class="blue-table egov-challenges"><thead>
+    <tr><th style="width:50%">Issues/Concerns/Problems Encountered</th><th>Proposed Recommendations</th></tr>
+  </thead><tbody>${chRows}</tbody></table>`);
+
+  blocks.push(`<h2>III. <span>PHOTO DOCUMENTATION</span></h2>`);
+  const caps = Array.isArray(data.photoCaptions) ? data.photoCaptions : [];
+  // Captions live inside each slot so they travel with the photo when the
+  // engine splits the grid across pages.
+  const gridHtml = `<div class="photo-grid" style="${styleAttr(collageGridStyle(photoLayout))}">` +
+    photos.map((src, i) => {
+      const slot = collageSlotStyle(photoLayout, i);
+      return `<div class="photo-slot" style="${styleAttr({ ...slot, display: "flex", flexDirection: "column" })}">` +
+        `<div style="flex:1 1 auto;overflow:hidden;min-height:0"><img style="width:100%;height:100%;object-fit:cover;display:block" src="${img(src)}" alt="Photo ${i + 1}"></div>` +
+        `<div style="flex:0 0 auto;font-size:8pt;font-style:italic;text-align:center;padding-top:1mm">${cell(caps[i] || "")}</div>` +
+        `</div>`;
+    }).join("") +
+    `</div>`;
+  blocks.push(`<div class="keep">${gridHtml}</div>`);
+
+  const mf = fieldOf("materials");
+  if (mf) {
+    blocks.push(`<h2>IV. <span>eGOVPH MATERIAL CONDITION</span></h2>`);
+    const scales = mf.scales || [];
+    const opts = mf.options || [];
+    const head =
+      `<tr><th rowspan="3" style="vertical-align:middle">Materials</th>` +
+      `<th colspan="${scales.length * opts.length}">Condition Level</th></tr>` +
+      `<tr>${scales.map(s => `<th colspan="${opts.length}">${escapeHtml(s.label)}</th>`).join("")}</tr>` +
+      `<tr>${scales.flatMap(() => opts.map(o => `<th>${escapeHtml(o.label)}</th>`)).join("")}</tr>`;
+    const rows = (mf.rows || []).map(r => {
+      const cells = scales.flatMap(s => opts.map(o => {
+        const sel = data.materials?.[r.id]?.[s.id] === o.id;
+        return `<td class="center">${sel ? "●" : ""}</td>`;
+      })).join("");
+      return `<tr><td><strong>${escapeHtml(r.label)}</strong></td>${cells}</tr>`;
+    }).join("");
+    blocks.push(`<div class="keep">
+      <table class="blue-table egov-matrix"><thead>${head}</thead><tbody>${rows}</tbody></table>
+      ${mf.note ? `<div class="para caption"><p>Note: ${cell(mf.note)}</p></div>` : ""}
+      ${(mf.legend || []).length ? `<div class="para legend">${mf.legend.map(l => `<p>${cell(l)}</p>`).join("")}</div>` : ""}
+    </div>`);
+  }
+
+  const labels = { preparedBy: "Prepared by:", reviewedBy: "Reviewed by:", approvedBy: "Approved by:" };
+  const sigIds = ["preparedBy", "reviewedBy", "approvedBy"]
+    .filter(id => (template?.fields || []).some(f => f.id === id && f.type === "person"));
+  if (sigIds.length) {
+    const sigCells = sigIds.map(id =>
+      `<td><strong>${labels[id]}</strong><div class="signature-name">${cell(data[id]?.name)}</div><div>${cell(data[id]?.position)}</div></td>`
+    ).join("");
+    blocks.push(`<table class="signature-table"><tbody><tr>${sigCells}</tr></tbody></table>`);
+  }
+
+  return blocks;
+};
+
+// -------------------------------------------------------------------------
+// ILCDB After Activity Report (layout: "ilcdb") — PDF blocks. Mirrors the
+// official DICT Region II form: one black-bordered Training Details table
+// whose first row is the section heading (incl. sex-disaggregated attendance
+// and issued certificates), boxed II. Rationale / III. Objectives, V. Issues
+// & VI. Recommendation side-by-side, boxed VII. Plans, VIII. Photo
+// Documentation with day captions, and left-aligned signatories.
+// -------------------------------------------------------------------------
+const buildIlcdbPdfBlocks = (data, photos, headerImgData, template, photoLayout = "classic") => {
+  const cell = value => escapeHtml(value || "");
+  const img = src => src ? escapeHtml(src) : "";
+  const paras = value => String(value || "")
+    .split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const styleAttr = (obj) => Object.entries(obj).map(([k, v]) => `${k.replace(/[A-Z]/g, c => "-" + c.toLowerCase())}:${v}`).join(";");
+  const blocks = [];
+
+  const b = data.beneficiaries || {};
+  const benField = beneficiaryFieldOf(template);
+  const cats = (benField && benField.categories) || [];
+  const num = value => Number(value || 0);
+  const cap = (c, g) => num(b[c.id]?.[g]);
+  const totalMale = cats.reduce((s, c) => s + cap(c, "male"), 0);
+  const totalFemale = cats.reduce((s, c) => s + cap(c, "female"), 0);
+
+  // Objective bullets: skip any model-generated duplicate of the intro line.
+  const objectiveLines = paras(data.objectives)
+    .filter(l => !/^\s*upon\s+completion\s+of\s+the\s+course/i.test(l))
+    .map(l => l.replace(/^[•●]\s*/, "").trim())
+    .filter(Boolean);
+
+  if (headerImgData) {
+    blocks.push(`<img class="pdf-header-img" src="${img(headerImgData)}" alt="header">`);
+  }
+
+  blocks.push(`<div style="text-align:center;font-weight:bold;font-size:14pt;letter-spacing:1px;margin:2mm 0 4mm">AFTER ACTIVITY REPORT</div>`);
+
+  const box = (head, bodyHtml) => `<div class="blk ilcdb-box">
+    <div class="ilcdb-box-head">${head}</div>
+    <div class="ilcdb-box-body">${bodyHtml}</div>
+  </div>`;
+  const para = text => `<div class="para"><p>${cell(text)}</p></div>`;
+  const bullet = text => `<div class="para"><p>&bull; ${cell(text)}</p></div>`;
+
+  // I. TRAINING DETAILS — one black-bordered table, heading as first row.
+  const td = (content, extra = "") => `<td${extra}>${content}</td>`;
+  const lbl = text => `<td style="width:25%"><strong>${text}</strong></td>`;
+  const training = `<table class="ilcdb-table"><thead>
+    <tr><th colspan="4" style="text-align:left">I.&nbsp;&nbsp;&nbsp;TRAINING DETAILS</th></tr>
+  </thead><tbody>
+    <tr>${lbl("Course Title:")}${td(`<strong>${cell(data.courseTitle)}</strong>`, ' colspan="3"')}</tr>
+    <tr>${lbl("Course Code:")}${td(cell(data.courseCode), ' colspan="3"')}</tr>
+    <tr>${lbl("Date:")}${td(cell(data.dateTime))}${lbl("Time:")}${td(cell(data.time))}</tr>
+    <tr>${lbl("Duration:")}${td(cell(data.duration), ' colspan="3"')}</tr>
+    <tr>${lbl("Venue:")}${td(cell(data.venue), ' colspan="3"')}</tr>
+    <tr>${lbl("Course Officer:")}${td(cell(data.courseOfficer), ' colspan="3"')}</tr>
+    <tr>${lbl("Admin Assistant:")}${td(cell(data.adminAssistant), ' colspan="3"')}</tr>
+    <tr>${lbl("Technical Support:")}${td(cell(data.technicalSupport), ' colspan="3"')}</tr>
+    <tr>${lbl("Resource Person:")}${td(cell(data.resourcePerson), ' colspan="3"')}</tr>
+    <tr>${lbl("Platform Used:")}${td(cell(data.platformUsed))}${lbl("Mode:")}${td(cell(data.mode))}</tr>
+    <tr>${lbl("Target Participants:")}${td(cell(data.targetParticipants), ' colspan="3"')}</tr>
+    <tr>${td("<strong>Total # of Attendees:</strong><br><small>(with/without submitted Evaluation Form/Output)</small>")}${td(`<strong>${totalMale + totalFemale}</strong>`, ' style="text-align:center"')}${td(`Male<br><strong>${totalMale}</strong>`, ' style="text-align:center"')}${td(`Female<br><strong>${totalFemale}</strong>`, ' style="text-align:center"')}</tr>
+    <tr>${td("Number of Beneficiary/ies with Sex Disaggregation", ' colspan="4" style="text-align:center;font-weight:bold"')}</tr>
+    <tr>${td("<strong>Sector Category</strong>")}${td("<strong>Total</strong>", ' style="text-align:center"')}${td("<strong>Male</strong>", ' style="text-align:center"')}${td("<strong>Female</strong>", ' style="text-align:center"')}</tr>
+    ${cats.map(c => `<tr>${td(`<strong>${escapeHtml(c.label)}</strong>`)}${td(`<strong>${cap(c, "male") + cap(c, "female")}</strong>`, ' style="text-align:center"')}${td(cap(c, "male") || "", ' style="text-align:center"')}${td(cap(c, "female") || "", ' style="text-align:center"')}</tr>`).join("")}
+    <tr>${td(`<strong>Total # of Issued Certificates:</strong><br><small>(with submitted Evaluation Form/Output)</small>`)}${td(cell(data.certificatesIssued), ' colspan="3"')}</tr>
+  </tbody></table>`;
+  blocks.push(training);
+
+  // II. RATIONALE — boxed.
+  blocks.push(box("II.&nbsp;&nbsp;&nbsp;RATIONALE", paras(data.rationale).map(para).join("")));
+
+  // III. OBJECTIVES — static intro line + bullets + Topics Covered.
+  const objHtml = `<div style="font-style:italic;margin-bottom:2mm">Upon completion of the course, participants will be able to learn:</div>` +
+    (objectiveLines.length ? objectiveLines.map(bullet).join("") : `<div class="para"><p>&nbsp;</p></div>`) +
+    (String(data.topicsCovered || "").trim() ? `<div style="font-weight:bold;margin-top:3mm;margin-bottom:1mm">Topics Covered:</div>` + paras(data.topicsCovered).map(para).join("") : "");
+  blocks.push(box("III.&nbsp;&nbsp;&nbsp;OBJECTIVES", objHtml));
+
+  // V. ISSUES AND CONCERNS | VI. RECOMMENDATION — side by side.
+  const issueHtml = (data.issues || []).filter(it => String(it?.issue || "").trim()).map(it => bullet(it.issue)).join("");
+  const recHtml = (data.recommendations || []).filter(it => String(it?.recommendation || "").trim()).map(it => bullet(it.recommendation)).join("");
+  blocks.push(`<div class="blk ilcdb-box" style="display:flow-root">
+    <table class="ilcdb-two"><tbody><tr>
+      <td style="width:50%;vertical-align:top;border-right:1px solid #000">
+        <div class="ilcdb-box-head">V.&nbsp;&nbsp;&nbsp;ISSUES AND CONCERNS</div>
+        <div class="ilcdb-box-body">${issueHtml}</div>
+      </td>
+      <td style="width:50%;vertical-align:top">
+        <div class="ilcdb-box-head">VI.&nbsp;&nbsp;&nbsp;RECOMMENDATION</div>
+        <div class="ilcdb-box-body">${recHtml}</div>
+      </td>
+    </tr></tbody></table>
+  </div>`);
+
+  // VII. PLANS AND ACTION ITEMS (NEXT STEPS) — boxed.
+  blocks.push(box("VII.&nbsp;&nbsp;PLANS AND ACTION ITEMS (NEXT STEPS)", paras(data.plansActions).map(bullet).join("")));
+
+  // VIII. PHOTO DOCUMENTATION — day captions above each photo.
+  const gridHtml = `<div class="photo-grid" style="${styleAttr(collageGridStyle(photoLayout))}">` +
+    photos.map((src, i) => {
+      const caption = (Array.isArray(data.photoCaptions) ? data.photoCaptions[i] : "") || "";
+      return `<div class="photo-slot" style="${styleAttr(collageSlotStyle(photoLayout, i))}">` +
+        `<div style="text-align:center;font-weight:bold;font-size:8.5pt;padding:1mm 0">${cell(caption)}</div>` +
+        `<img src="${img(src)}" alt="Photo ${i + 1}">` +
+        `</div>`;
+    }).join("") +
+    `</div>`;
+  blocks.push(box("VIII.&nbsp;&nbsp;PHOTO DOCUMENTATION", gridHtml));
+
+  // Signatories — left aligned (bold name, italic position).
+  const persons = personIds(template);
+  const sigIds = ["preparedBy", "notedBy"].filter(id => persons.has(id));
+  if (sigIds.length) {
+    const labels = { preparedBy: "Prepared by:", notedBy: "Noted by:" };
+    const sigHtml = `<table style="width:100%;border:none"><tbody><tr>` +
+      sigIds.map(id => `<td style="width:50%;border:none;vertical-align:top;padding:2mm 0">
+        <div>${labels[id]}</div>
+        <div style="font-weight:bold;text-transform:uppercase;margin-top:2mm">${cell(data[id]?.name)}</div>
+        <div style="font-style:italic">${cell(data[id]?.position)}</div>
+      </td>`).join("") +
+      `</tr></tbody></table>`;
+    blocks.push(`<div class="blk ilcdb-sign">${sigHtml}</div>`);
+  }
+
+  return blocks;
+};
+
 export const buildPdfBlocks = (data, photos, headerImgData, template, photoLayout = "classic") => {
+  if (template?.layout === "egov") {
+    return buildEgovPdfBlocks(data, photos, headerImgData, template, photoLayout);
+  }
+  if (template?.layout === "ilcdb") {
+    return buildIlcdbPdfBlocks(data, photos, headerImgData, template, photoLayout);
+  }
   const benField = beneficiaryFieldOf(template);
   const cats = benField?.categories || [];
   const persons = personIds(template);
@@ -140,7 +371,7 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
   photos = photos.slice(0, MAX_PHOTOS);
   data = normalizeReport(data, template);
   const blocks = buildPdfBlocks(data, photos, headerImgData, template, photoLayout);
-  const footerLabel = buildFooterLabel(data);
+  const footerLabel = buildFooterLabel(data, template);
   const preloads = [headerImgData, footerImgData, FOOTER_IMG, ...photos.slice(0, MAX_PHOTOS)]
     .filter(Boolean)
     .map(src => `<img src="${escapeHtml(src)}" alt="" style="display:none">`)
@@ -196,6 +427,15 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
     .signature-name { margin-top: 14mm; font-weight: 700; text-align: center; text-transform: uppercase; }
     .signature-name + div { text-align: center; text-transform: uppercase; font-size: 9.5pt; }
     .copy-furnish { color: #0000cc; font-style: italic; font-size: 10pt; }
+    /* ILCDB After Activity Report — black-bordered form */
+    .ilcdb-table { border: 1px solid #000; font-size: 10pt; }
+    .ilcdb-table th { border: 1px solid #000; background: #fff; color: #000; padding: 3px 7px; text-align: center; }
+    .ilcdb-table td { border: 1px solid #000; padding: 3px 7px; vertical-align: middle; }
+    .ilcdb-box { border: 1px solid #000; font-size: 10.5pt; }
+    .ilcdb-box-head { border-bottom: 1px solid #000; padding: 3px 9px; font-weight: 700; background: #fff; }
+    .ilcdb-box-body { padding: 5px 9px; }
+    .ilcdb-box-body .para p { text-indent: 6mm; }
+    .ilcdb-two td { padding: 0; }
     .pdf-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 22mm; }
     .pdf-footer-meta { position: absolute; left: 19mm; right: 19mm; bottom: 10mm; min-height: 7mm; font-size: 8.5pt; color: #0000cc; }
     .pdf-ref { position: absolute; left: 0; bottom: 3mm; max-width: 112mm; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-style: italic; font-weight: 700; }
@@ -470,7 +710,191 @@ const rtfPictures = (photos) => {
   return out;
 };
 
+// eGov PH Post-Event Report RTF — mirrors buildEgovPdfBlocks' sections in
+// the shared RTF conventions (rtfTable/paras/rtfEscape) above.
+const buildEgovRtf = (data, photos, template) => {
+  const W = 9644; // usable text width in twips (17 cm)
+  const RESET = "\\pard\\plain\\f0\\fs22 ";
+  const paras = (s) => String(s || "")
+    .split(/\n+/).map(x => x.trim()).filter(Boolean)
+    .map(x => "\\pard\\fi567\\sl360 " + rtfEscape(x) + "\\par")
+    .join("\n");
+
+  let rtf = "{\\rtf1\\ansi\\ansicpg1252\\deff0\n" +
+    "{\\fonttbl{\\f0\\froman Times New Roman;}{\\f1\\fswiss Arial;}}\n" +
+    "{\\colortbl;\\red0\\green0\\blue204;\\red255\\green255\\blue255;}\n" +
+    "\\paperw11906\\paperh16838\n" +
+    "\\margl1134\\margr1134\\margt1134\\margb1134\n" +
+    RESET + "\n";
+
+  rtf += RESET + "{\\b\\fs28 POST-EVENT REPORT}\\par\\par\n";
+  rtf += RESET + "{\\b Name of Event:} " + rtfEscape(data.eventName || "") + "\\par\n";
+  rtf += RESET + "{\\b Date/Time:} " + rtfEscape(data.dateTime || "") + "\\par\n";
+  rtf += RESET + "{\\b Location:} " + rtfEscape(data.location || "") + "\\par\n";
+  rtf += RESET + "{\\b Time of Arrival:} " + rtfEscape(data.timeOfArrival || "") + "\\par\n";
+  rtf += RESET + "{\\b Estimated No. of Participants:} " + rtfEscape(data.estimatedParticipants || "") + "\\par\n";
+  const reps = (data.representatives || []).map(r => (r?.name || "").trim()).filter(Boolean);
+  rtf += RESET + "{\\b Representative/s:} " + (reps.length ? reps.map((r, i) => `${i + 1}. ${rtfEscape(r)}`).join("  ") : "") + "\\par\n";
+  rtf += RESET + "{\\b Total No. of Registrants:} " + rtfEscape(data.totalRegistrants || "") + "\\par\n";
+  rtf += RESET + "{\\b Submitted Video and Photo Documentations?:} " + rtfEscape(data.docsSubmitted || "") + "\\par\\par\n";
+
+  rtf += RESET + "{\\b I. OVERVIEW}\\par\n" + paras(data.overview) + "\n\\par\n";
+
+  rtf += RESET + "{\\b II. CHALLENGES & RECOMMENDATION}\\par\n";
+  rtf += rtfTable(
+    [["Issues/Concerns/Problems Encountered", "Proposed Recommendations"],
+     ...(data.challenges || []).map(c => [c?.issue || "", c?.recommendation || ""])],
+    [Math.round(W / 2), Math.round(W / 2)]
+  ) + RESET + "\n\\par\n";
+
+  rtf += RESET + "{\\b III. PHOTO DOCUMENTATION}\\par\n";
+  photos.slice(0, MAX_PHOTOS).forEach((p, i) => {
+    const m = String(p).match(/^data:image\/(\w+);base64,(.*)$/);
+    if (!m) return;
+    try {
+      const hex = base64ToHex(m[2]);
+      rtf += "\\par{\\pict\\jpegblip " + hex + "}\\par ";
+      const cap = (Array.isArray(data.photoCaptions) ? data.photoCaptions : [])[i] || "";
+      if (cap) rtf += RESET + "{\\i\\fs18 " + rtfEscape(cap) + "}\\par\n";
+    } catch { /* skip unreadable image */ }
+  });
+  rtf += RESET + "\\par\n";
+
+  rtf += RESET + "{\\b IV. eGOVPH MATERIAL CONDITION}\\par\n";
+  const mf = (template?.fields || []).find(f => f.id === "materials");
+  if (mf) {
+    const scales = mf.scales || [];
+    const opts = mf.options || [];
+    const condCols = scales.length * opts.length;
+    const labelW = Math.round(W * 0.28);
+    rtf += rtfTable(
+      [["Materials", "Condition Level", ...Array(condCols - 1).fill("")],
+       ["", ...scales.flatMap(s => [s.label, ...Array(opts.length - 1).fill("")])],
+       ["", ...scales.flatMap(() => opts.map(o => o.label))],
+       ...(mf.rows || []).map(r => [r.label, ...scales.flatMap(s => opts.map(o =>
+         data.materials?.[r.id]?.[s.id] === o.id ? "●" : ""))])
+      ],
+      [labelW, ...Array(condCols).fill(Math.round((W - labelW) / condCols))]
+    ) + RESET + "\n";
+    if (mf.note) rtf += RESET + "{\\i Note: " + rtfEscape(mf.note) + "}\\par\n";
+    for (const l of mf.legend || []) rtf += RESET + "{\\fs18 " + rtfEscape(l) + "}\\par\n";
+    rtf += "\\par\n";
+  }
+
+  const labels = { preparedBy: "Prepared by:", reviewedBy: "Reviewed by:", approvedBy: "Approved by:" };
+  const sigIds = ["preparedBy", "reviewedBy", "approvedBy"]
+    .filter(id => (template?.fields || []).some(f => f.id === id && f.type === "person"));
+  if (sigIds.length) {
+    rtf += rtfTable(
+      [sigIds.map(id => labels[id]),
+       sigIds.map(id => data[id]?.name || ""),
+       sigIds.map(id => data[id]?.position || "")],
+      Array(sigIds.length).fill(Math.round(W / sigIds.length))
+    ) + RESET + "\n";
+  }
+  rtf += "}";
+  return rtf;
+};
+
+// ILCDB After Activity Report RTF — mirrors buildIlcdbPdfBlocks' sections in
+// the shared RTF conventions (rtfTable/paras/rtfEscape) above.
+const buildIlcdbRtf = (data, photos, template) => {
+  const W = 9644; // usable text width in twips (17 cm)
+  const RESET = "\\pard\\plain\\f0\\fs22 ";
+  const paras = (s) => String(s || "")
+    .split(/\n+/).map(x => x.trim()).filter(Boolean)
+    .map(x => "\\pard\\fi567\\sl360 " + rtfEscape(x) + "\\par")
+    .join("\n");
+  const bullets = (s) => String(s || "")
+    .split(/\n+/).map(x => x.trim()).filter(Boolean)
+    .map(x => "\\pard\\fi567\\sl360 \\bullet\\tab " + rtfEscape(x) + "\\par")
+    .join("\n");
+
+  // Objective bullets: skip any model-generated duplicate of the intro line.
+  const objectiveLines = paras(data.objectives)
+    .filter(l => !/^\s*upon\s+completion\s+of\s+the\s+course/i.test(l))
+    .map(l => l.replace(/^[•●]\s*/, "").trim())
+    .filter(Boolean);
+
+  let rtf = "{\\rtf1\\ansi\\ansicpg1252\\deff0\n" +
+    "{\\fonttbl{\\f0\\froman Times New Roman;}{\\f1\\fswiss Arial;}}\n" +
+    "{\\colortbl;\\red0\\green0\\blue204;\\red255\\green255\\blue255;}\n" +
+    "\\paperw11906\\paperh16838\n" +
+    "\\margl1134\\margr1134\\margt1134\\margb1134\n" +
+    RESET + "\n";
+
+  rtf += RESET + "{\\b\\fs28 AFTER ACTIVITY REPORT}\\par\\par\n";
+  rtf += RESET + "{\\b I. TRAINING DETAILS}\\par\n";
+  rtf += RESET + "{\\b Course Title:} " + rtfEscape(data.courseTitle || "") + "\\par\n";
+  rtf += RESET + "{\\b Course Code:} " + rtfEscape(data.courseCode || "") + "\\par\n";
+  rtf += RESET + "{\\b Date:} " + rtfEscape(data.dateTime || "") + "\\par\n";
+  rtf += RESET + "{\\b Time:} " + rtfEscape(data.time || "") + "\\par\n";
+  rtf += RESET + "{\\b Duration:} " + rtfEscape(data.duration || "") + "\\par\n";
+  rtf += RESET + "{\\b Venue:} " + rtfEscape(data.venue || "") + "\\par\n";
+  rtf += RESET + "{\\b Course Officer:} " + rtfEscape(data.courseOfficer || "") + "\\par\n";
+  rtf += RESET + "{\\b Admin Assistant:} " + rtfEscape(data.adminAssistant || "") + "\\par\n";
+  rtf += RESET + "{\\b Technical Support:} " + rtfEscape(data.technicalSupport || "") + "\\par\n";
+  rtf += RESET + "{\\b Resource Person:} " + rtfEscape(data.resourcePerson || "") + "\\par\n";
+  rtf += RESET + "{\\b Platform Used:} " + rtfEscape(data.platformUsed || "") + "\\par\n";
+  rtf += RESET + "{\\b Mode:} " + rtfEscape(data.mode || "") + "\\par\n";
+  rtf += RESET + "{\\b Target Participants:} " + rtfEscape(data.targetParticipants || "") + "\\par\\par\n";
+
+  const benField = beneficiaryFieldOf(template);
+  if (benField) {
+    const cats = benField.categories || [];
+    const b = data.beneficiaries || {};
+    const num = value => Number(value || 0);
+    const sum = g => cats.reduce((s, c) => s + num(b[c.id]?.[g]), 0);
+    rtf += RESET + "{\\b Total # of Attendees (with/without submitted Evaluation Form/Output): " + (sum("male") + sum("female")) + " - Male " + sum("male") + " | Female " + sum("female") + "}\\par\\par\n";
+    rtf += RESET + "{\\b\\i Number of Beneficiary/ies with Sex Disaggregation}\\par\n";
+    rtf += rtfTable(
+      [["Sector Category", "Total", "Male", "Female"],
+       ...cats.map(c => [c.label,
+                         String(num(b[c.id]?.male) + num(b[c.id]?.female)),
+                         String(num(b[c.id]?.male)),
+                         String(num(b[c.id]?.female))])],
+      [Math.round(W * 0.3), Math.round(W * 0.2), Math.round(W * 0.25), Math.round(W * 0.25)]
+    ) + RESET + "\n";
+    rtf += RESET + "{\\b Total # of Issued Certificates (with submitted Evaluation Form/Output):} " + rtfEscape(data.certificatesIssued || "") + "\\par\\par\n";
+  }
+
+  rtf += RESET + "{\\b II. RATIONALE}\\par\n" + paras(data.rationale) + "\n\\par\n";
+  rtf += RESET + "{\\b III. OBJECTIVES}\\par\n";
+  rtf += RESET + "{\\i Upon completion of the course, participants will be able to learn:}\\par\n";
+  rtf += bullets(objectiveLines) + "\n";
+  if (String(data.topicsCovered || "").trim()) {
+    rtf += RESET + "{\\b Topics Covered:}\\par\n" + paras(data.topicsCovered) + "\n";
+  }
+  rtf += "\\par\n";
+  rtf += RESET + "{\\b V. ISSUES AND CONCERNS}\\par\n" +
+    (data.issues || []).filter(it => String(it?.issue || "").trim())
+      .map(it => RESET + "\\pard\\fi567\\sl360 \\bullet\\tab " + rtfEscape(it.issue) + "\\par\n").join("") + "\\par\n";
+  rtf += RESET + "{\\b VI. RECOMMENDATION}\\par\n" +
+    (data.recommendations || []).filter(it => String(it?.recommendation || "").trim())
+      .map(it => RESET + "\\pard\\fi567\\sl360 \\bullet\\tab " + rtfEscape(it.recommendation) + "\\par\n").join("") + "\\par\n";
+  rtf += RESET + "{\\b VII. PLANS AND ACTION ITEMS (NEXT STEPS)}\\par\n" + bullets(data.plansActions) + "\n\\par\n";
+  rtf += RESET + "{\\b VIII. PHOTO DOCUMENTATION}\\par\n";
+  rtf += rtfPictures(photos) + "\n";
+  rtf += RESET + "\\par\n";
+
+  const sigIds = ["preparedBy", "notedBy"]
+    .filter(id => (template?.fields || []).some(f => f.id === id && f.type === "person"));
+  if (sigIds.length) {
+    const labels = { preparedBy: "Prepared by:", notedBy: "Noted by:" };
+    rtf += rtfTable(
+      [sigIds.map(id => labels[id]),
+       sigIds.map(id => data[id]?.name || ""),
+       sigIds.map(id => data[id]?.position || "")],
+      Array(sigIds.length).fill(Math.round(W / sigIds.length))
+    ) + RESET + "\n";
+  }
+  rtf += "}";
+  return rtf;
+};
+
 export const buildRtf = (data, photos, template) => {
+  if (template?.layout === "egov") return buildEgovRtf(data, photos, template);
+  if (template?.layout === "ilcdb") return buildIlcdbRtf(data, photos, template);
   const benField = beneficiaryFieldOf(template);
   const cats = benField?.categories || [];
   const persons = personIds(template);
@@ -552,7 +976,7 @@ export const exportRtf = (data, photos, template) => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `AAR-${(data.controlNo || "report").replace(/[^\w.-]+/g, "_")}.rtf`;
+  a.download = `AAR-${(data.controlNo || data.eventName || data.courseTitle || "report").replace(/[^\w.-]+/g, "_")}.rtf`;
   document.body.appendChild(a);
   a.click();
   a.remove();

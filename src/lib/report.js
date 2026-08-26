@@ -51,6 +51,41 @@ export const normalizeReport = (raw, template) => {
     : [];
   d.preparedBy = { ...DEFAULT_REPORT.preparedBy, ...(d.preparedBy || {}) };
   d.conformedBy = { ...DEFAULT_REPORT.conformedBy, ...(d.conformedBy || {}) };
+
+  // Generic defaults for every template field type, so non-eLGU templates
+  // (eGov's matrix/captions/extra person fields) normalize safely too.
+  for (const f of (template?.fields) || []) {
+    switch (f.type) {
+      case "person":
+        d[f.id] = { name: "", position: "", ...(d[f.id] || {}) };
+        break;
+      case "list": {
+        const blank = Object.fromEntries((f.itemFields || []).map(i => [i.id, ""]));
+        d[f.id] = (Array.isArray(d[f.id]) ? d[f.id] : [])
+          .map(it => ({ ...blank, ...(it && typeof it === "object" ? it : {}) }));
+        break;
+      }
+      case "choice":
+        if (typeof d[f.id] !== "string") d[f.id] = "";
+        break;
+      case "matrix": {
+        const m = (d[f.id] && typeof d[f.id] === "object" && !Array.isArray(d[f.id])) ? d[f.id] : {};
+        d[f.id] = Object.fromEntries((f.rows || []).map(r => {
+          const row = (m[r.id] && typeof m[r.id] === "object" && !Array.isArray(m[r.id])) ? m[r.id] : {};
+          return [r.id, Object.fromEntries((f.scales || []).map(s => [
+            s.id, typeof row[s.id] === "string" ? row[s.id] : ""
+          ]))];
+        }));
+        break;
+      }
+      case "captions":
+        d[f.id] = (Array.isArray(d[f.id]) ? d[f.id] : [])
+          .map(c => (typeof c === "string" ? c : ""));
+        break;
+      default:
+        break;
+    }
+  }
   return d;
 };
 

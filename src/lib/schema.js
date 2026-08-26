@@ -34,6 +34,7 @@ export const buildReportSchema = (template) => {
     switch (f.type) {
       case "text":
       case "longform":
+      case "choice":
         shape[f.id] = str();
         break;
       case "list":
@@ -48,6 +49,18 @@ export const buildReportSchema = (template) => {
         break;
       case "person":
         shape[f.id] = z.object({ name: str(), position: str() });
+        break;
+      case "matrix":
+        // rows × scales of condition strings ("good"/"fair"/"poor"/"")
+        shape[f.id] = z.object(
+          Object.fromEntries((f.rows || []).map(r => [
+            r.id,
+            z.object(Object.fromEntries((f.scales || []).map(s => [s.id, str()])))
+          ]))
+        );
+        break;
+      case "captions":
+        shape[f.id] = z.array(str());
         break;
       default:
         break; // unknown field types are not validated
