@@ -16,8 +16,9 @@ Signature/approval workflow is **out of scope** per decision on 2026-08-23.
 - Admin panel: personnel lists, template builder, per-template default logos,
   audit log viewer
 
-**Open items:** live verification of the logo + audit endpoints (needs a
-dev-server restart), then Phase 6 polish after rollout feedback.
+**Open items:** Phase 6 polish after rollout feedback. (Logo + audit endpoints
+live-verified on 2026-08-26: personnel GET/PUT round-trip, logo POST/DELETE
+file lifecycle, audit entries for login/personnel/logo actions.)
 
 ---
 
