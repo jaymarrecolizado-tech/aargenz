@@ -7,3 +7,5 @@ __pycache__/
 # Scratch test artifacts from API smoke runs
 _*.json
 _*.log
+# Large reference PDFs used while designing templates
+Reference/
