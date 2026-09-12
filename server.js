@@ -45,6 +45,15 @@ const XAI_KEYS = readKeys("XAI");
 const XAI_MODEL = process.env.XAI_MODEL || "grok-4.6";
 const XAI_URL = "https://api.x.ai/v1/chat/completions";
 
+// AI provider modes (clients can override per-request via body.provider):
+//   "groq"        → cloud only (Groq keys, then xAI keys)
+//   "local"       → local model only, errors when unreachable
+//   "auto"        → local model first, cloud fallback (for fine-tune iteration)
+//   "contingency" → cloud first, LOCAL MODEL AS LAST RESORT. Use this in
+//                   production: normal operation runs on Groq, and when every
+//                   key is rejected/out of credit the office keeps working on
+//                   the offline model instead of being blocked. See
+//                   LOCAL_AI_CONTINGENCY.md.
 const AI_PROVIDER = process.env.AI_PROVIDER || "auto"; // clients can override per-request via body.provider
 const LOCAL_BASE_URL = (process.env.LOCAL_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
 const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3:14b";
@@ -56,6 +65,57 @@ const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3:14b";
 const LOCAL_JSON_MODE = /^(1|true|on)$/i.test(process.env.LOCAL_JSON_MODE || "");
 const UPSTREAM_TIMEOUT_MS = 180000;
 
+// ---- Contingency: cloud credit-exhaustion circuit breaker ------------------
+// When a cloud provider answers with "you are out of credit/quota" rather than
+// a per-key rate limit, retrying the next key is pointless. We open a breaker
+// for CONTINGENCY_COOLDOWN_MS and route straight to the local model, so a
+// regional office keeps producing reports when the token budget runs out.
+const CONTINGENCY_COOLDOWN_MS = Number(process.env.CONTINGENCY_COOLDOWN_MS || 15 * 60 * 1000);
+const CONTINGENCY_ENABLED = !/^(0|false|off)$/i.test(process.env.CONTINGENCY_ENABLED || "1");
+// Signals that a key is out of money, not merely throttled. Groq/xAI return 402
+// for exhausted credit and 429 with an insufficient_quota-style body when the
+// free tier is spent.
+const CREDIT_EXHAUSTED_RE = /insufficient[_ ]?quota|exceeded your current quota|quota exceeded|billing|out of credit|no credit|payment required|credit balance|spending limit|free tier/i;
+// Breakers are tracked per provider: Groq running out of credit says nothing
+// about xAI's balance, so only the broke provider gets skipped.
+const CLOUD_PROVIDERS = ["groq", "xai"];
+const cloudBreakerUntil = { groq: 0, xai: 0 };   // epoch ms; > now = skip this provider
+const cloudBreakerReason = { groq: null, xai: null };
+let cloudBreakerTrips = 0;
+
+const cloudBreakerOpen = (providerKey) =>
+  CONTINGENCY_ENABLED && !!providerKey && Date.now() < (cloudBreakerUntil[providerKey] || 0);
+
+function noteCloudCreditFailure(providerKey, status, text) {
+  if (!CONTINGENCY_ENABLED || !providerKey) return false;
+  if (status !== 402 && !(status === 429 && CREDIT_EXHAUSTED_RE.test(text || ""))) return false;
+  cloudBreakerUntil[providerKey] = Date.now() + CONTINGENCY_COOLDOWN_MS;
+  cloudBreakerReason[providerKey] = status === 402 ? "payment required (402)" : "quota/credit exhausted (429)";
+  cloudBreakerTrips++;
+  console.warn(
+    `[proxy] ${providerKey} credit exhausted — ${cloudBreakerReason[providerKey]}. ` +
+    `Skipping it for ${Math.round(CONTINGENCY_COOLDOWN_MS / 60000)} min; ` +
+    `falling through to the local contingency model (${LOCAL_MODEL}).`
+  );
+  return true;
+}
+
+const cloudBreakerState = () => ({
+  enabled: CONTINGENCY_ENABLED,
+  cooldownSeconds: Math.round(CONTINGENCY_COOLDOWN_MS / 1000),
+  trips: cloudBreakerTrips,
+  providers: Object.fromEntries(CLOUD_PROVIDERS.map(p => [
+    p,
+    {
+      open: cloudBreakerOpen(p),
+      reason: cloudBreakerReason[p],
+      resumesInSeconds: cloudBreakerOpen(p)
+        ? Math.round((cloudBreakerUntil[p] - Date.now()) / 1000)
+        : 0
+    }
+  ]))
+});
+
 // Per-user/per-IP token bucket on /api/chat (Phase 5.2): protects the Groq
 // key pool from runaway usage. CHAT_RATE_MAX = burst size,
 // CHAT_RATE_REFILL_MS = ms between refunded tokens.
@@ -66,6 +126,77 @@ setInterval(() => { // drop stale buckets so the map doesn't grow forever
   const cutoff = Date.now() - 10 * 60 * 1000;
   for (const [k, b] of chatBuckets) if (b.last < cutoff) chatBuckets.delete(k);
 }, 60 * 1000).unref();
+
+// ---- Auth throttling (P0) --------------------------------------------------
+// /api/chat was rate-limited but the login endpoint was not, which made it the
+// softest target on a public HTTPS host. Fixed-window counters keyed on both
+// the client IP and the attempted username, so neither a single account nor a
+// single source can be hammered. A successful login clears both.
+//
+// The two limits are deliberately different. A whole regional office sits
+// behind one NAT address, so a tight per-IP limit would let one person's typos
+// lock out every colleague for the whole window. The per-username limit is
+// therefore tight (protects the account) and the per-IP limit is loose
+// (protects the service).
+const AUTH_RATE_MAX = Number(process.env.AUTH_RATE_MAX || 10);          // per username
+const AUTH_RATE_MAX_IP = Number(process.env.AUTH_RATE_MAX_IP || 60);    // per IP
+const AUTH_RATE_WINDOW_MS = Number(process.env.AUTH_RATE_WINDOW_MS || 15 * 60 * 1000);
+const authBuckets = new Map();
+
+function authBucket(key) {
+  const now = Date.now();
+  let b = authBuckets.get(key);
+  if (!b || now >= b.resetAt) {
+    b = { count: 0, resetAt: now + AUTH_RATE_WINDOW_MS };
+    authBuckets.set(key, b);
+  }
+  return b;
+}
+const authLimitFor = (key) => (key.startsWith("ip:") ? AUTH_RATE_MAX_IP : AUTH_RATE_MAX);
+const authBlocked = (key) => authBucket(key).count >= authLimitFor(key);
+const authPenalize = (key) => { authBucket(key).count++; };
+const authForgive = (key) => { authBuckets.delete(key); };
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of authBuckets) if (now >= b.resetAt) authBuckets.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// ---- Expired-session sweep (P0) -------------------------------------------
+// Sessions were only deleted on logout or password reset, while expiry was
+// checked at read time — so the table grew forever. Sweep hourly.
+const sweepExpiredSessions = () => {
+  getPool()
+    .query("DELETE FROM sessions WHERE expires_at < NOW()")
+    .then(([r]) => { if (r.affectedRows) console.log(`[sessions] swept ${r.affectedRows} expired session(s)`); })
+    .catch(() => { /* DB not reachable yet — the next tick retries */ });
+};
+setInterval(sweepExpiredSessions, 60 * 60 * 1000).unref();
+
+// ---- Request hardening (P0) ------------------------------------------------
+// Every body reader was unbounded; one oversized POST could OOM the process and
+// take the whole office offline. 32 MB covers the largest legitimate payload
+// (a report draft carrying several compressed photo data URLs).
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 32 * 1024 * 1024);
+// Secure cookies + HSTS only when we know we're behind TLS, so local XAMPP over
+// plain http keeps working. nginx terminates TLS on the VPS (DEPLOYMENT.md).
+const COOKIE_SECURE = /^(1|true|on)$/i.test(process.env.COOKIE_SECURE || "")
+  || process.env.NODE_ENV === "production";
+// CSP ships report-only by default because the app uses inline styles and the
+// PDF renderer writes an inline-scripted print window. Set CSP_ENFORCE=1 once
+// the report-only console is clean.
+const CSP_ENFORCE = /^(1|true|on)$/i.test(process.env.CSP_ENFORCE || "");
+const CSP_POLICY = process.env.CSP_POLICY || [
+  "default-src 'self'",
+  "img-src 'self' data: blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline'",
+  "connect-src 'self' http://localhost:11434 http://127.0.0.1:11434 https://api.groq.com https://api.x.ai https://openrouter.ai",
+  "font-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'"
+].join("; ");
 
 function allowChat(key) {
   const now = Date.now();
@@ -257,6 +388,26 @@ const MIME = {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
+  // Baseline security headers (P0). Applied to every response before any route
+  // runs, so a newly added endpoint is covered by default. Mirrored in nginx in
+  // DEPLOYMENT.md because the Node port can also be reached directly.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (COOKIE_SECURE) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.setHeader(CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only", CSP_POLICY);
+
+  // Refuse an oversized upload before routing, so a huge POST never reaches a
+  // route (or its memory) at all.
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (declaredLength > MAX_BODY_BYTES) {
+    return sendJson(413, {
+      error: { message: `Request body too large (limit ${Math.round(MAX_BODY_BYTES / 1048576)} MB)` }
+    });
+  }
+
   // ---- Request helpers (defined before any route so every route can use
   // them regardless of file order — routes run top-down per request) --------
   const SESSION_COOKIE = "aar_sid";
@@ -290,12 +441,37 @@ const server = http.createServer(async (req, res) => {
 
   const setSessionCookie = (res, token, maxAgeMs) => {
     res.setHeader("Set-Cookie",
-      `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(maxAgeMs / 1000)}`);
+      `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax;` +
+      (COOKIE_SECURE ? " Secure;" : "") +
+      ` Max-Age=${Math.floor(maxAgeMs / 1000)}`);
   };
 
-  const readBodyJson = async (req) => {
-    let raw = "";
-    for await (const chunk of req) raw += chunk;
+  // Bounded body reader (P0). Memory is capped at maxBytes: once the limit is
+  // passed the reader keeps draining the socket (so the connection stays
+  // healthy) but stops buffering, and returns null. Honest clients are already
+  // refused with a 413 by the Content-Length check at the top of the handler.
+  const readBodyRaw = async (req, maxBytes = MAX_BODY_BYTES) => {
+    const declared = Number(req.headers["content-length"] || 0);
+    if (declared && declared > maxBytes) return null;
+    const chunks = [];
+    let size = 0;
+    let overflow = false;
+    for await (const chunk of req) {
+      if (overflow) continue; // keep draining, stop buffering
+      size += chunk.length;
+      if (size > maxBytes) { overflow = true; chunks.length = 0; continue; }
+      chunks.push(chunk);
+    }
+    if (overflow) {
+      console.warn(`[server] request body exceeded ${Math.round(maxBytes / 1048576)} MB; discarded`);
+      return null;
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  };
+
+  const readBodyJson = async (req, maxBytes = MAX_BODY_BYTES) => {
+    const raw = await readBodyRaw(req, maxBytes);
+    if (raw === null) return null;
     try {
       return JSON.parse(raw);
     } catch {
@@ -696,6 +872,26 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Password must be at least 6 characters" } }));
     }
+
+    // Throttle credential attempts on both the source IP and the target
+    // username (P0) — neither a single host nor a single account can be
+    // hammered. Counters clear on a successful login.
+    const isLogin = url.pathname === "/api/auth/login";
+    const ipKey = `ip:${req.socket.remoteAddress || "unknown"}`;
+    const userKey = `user:${username.toLowerCase()}`;
+    if (isLogin && (authBlocked(userKey) || authBlocked(ipKey))) {
+      const byUser = authBlocked(userKey);
+      writeAudit(null, "auth.throttled", { detail: `${username} (${byUser ? "username" : "ip"})` });
+      const mins = Math.ceil(AUTH_RATE_WINDOW_MS / 60000);
+      return sendJson(429, {
+        error: {
+          message: byUser
+            ? `Too many sign-in attempts for "${username}". Try again in ${mins} minutes, or ask an admin to reset the password.`
+            : `Too many sign-in attempts from this network. Try again in ${mins} minutes.`
+        }
+      });
+    }
+
     try {
       const pool = getPool();
       let user;
@@ -722,8 +918,10 @@ const server = http.createServer(async (req, res) => {
         const [rows] = await pool.query("SELECT * FROM users WHERE username = ?", [username]);
         const found = rows[0];
         if (!found || !(await bcrypt.compare(String(body.password), found.password_hash))) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ error: { message: "Invalid username or password" } }));
+          authPenalize(ipKey);
+          authPenalize(userKey);
+          writeAudit(null, "auth.login_failed", { detail: username });
+          return sendJson(401, { error: { message: "Invalid username or password" } });
         }
         user = { id: found.id, username: found.username, role: found.role };
       }
@@ -732,6 +930,8 @@ const server = http.createServer(async (req, res) => {
         "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
         [token, user.id, Math.floor(SESSION_TTL_MS / 1000)]
       );
+      authForgive(ipKey);
+      authForgive(userKey);
       await writeAudit(user, url.pathname.endsWith("/register") ? "auth.register" : "auth.login");
       setSessionCookie(res, token, SESSION_TTL_MS);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -762,6 +962,48 @@ const server = http.createServer(async (req, res) => {
     const user = await getSessionUser(req);
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(user || null));
+  }
+
+  // Self-service password change (P0). Until now only an admin could reset a
+  // password, so an encoder who suspected a leak had no way to rotate it.
+  // Requires the current password, and revokes every *other* session.
+  if (url.pathname === "/api/auth/password") {
+    if (req.method !== "POST") return sendJson(405, { error: { message: "Method not allowed" } });
+    const user = await getSessionUser(req);
+    if (!user) return sendJson(401, { error: { message: "Login required" } });
+    const body = await readBodyJson(req);
+    const currentPassword = String(body?.currentPassword || "");
+    const newPassword = String(body?.newPassword || "");
+    if (!currentPassword || !newPassword) {
+      return sendJson(400, { error: { message: "currentPassword and newPassword are required" } });
+    }
+    if (newPassword.length < 6) {
+      return sendJson(400, { error: { message: "New password must be at least 6 characters" } });
+    }
+    if (newPassword === currentPassword) {
+      return sendJson(400, { error: { message: "New password must be different from the current one" } });
+    }
+    try {
+      const pool = getPool();
+      const [rows] = await pool.query("SELECT password_hash FROM users WHERE id = ?", [user.id]);
+      if (!rows[0] || !(await bcrypt.compare(currentPassword, rows[0].password_hash))) {
+        authPenalize(`user:${user.username.toLowerCase()}`);
+        writeAudit(user, "auth.password_change_failed");
+        return sendJson(401, { error: { message: "Current password is incorrect" } });
+      }
+      await pool.query(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        [await bcrypt.hash(newPassword, 10), user.id]
+      );
+      // Keep the caller signed in, drop every other device.
+      const keepToken = parseCookies(req)[SESSION_COOKIE];
+      await pool.query("DELETE FROM sessions WHERE user_id = ? AND token <> ?", [user.id, keepToken || ""]);
+      writeAudit(user, "auth.password_change");
+      return sendJson(200, { ok: true });
+    } catch (e) {
+      console.error("[auth:password]", e.message);
+      return sendJson(500, { error: { message: "Database error: " + e.message } });
+    }
   }
 
   // Reports API (Phase 3.2). Requires login — reports are owned by the
@@ -931,6 +1173,65 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // AI provider status (admin). Answers the contingency question directly:
+  // which providers are configured, is the local fallback actually reachable
+  // right now, and has the credit breaker tripped? See LOCAL_AI_CONTINGENCY.md.
+  if (url.pathname === "/api/ai/status") {
+    if (req.method !== "GET") return sendJson(405, { error: { message: "Method not allowed" } });
+    const admin = await requireAdmin();
+    if (!admin) return;
+
+    // Short probe — an unreachable local server must not hang the admin panel.
+    const local = {
+      configured: !!LOCAL_MODEL, model: LOCAL_MODEL, baseUrl: LOCAL_BASE_URL,
+      reachable: false, modelPresent: null, models: [], error: null
+    };
+    try {
+      const probe = await fetch(`${LOCAL_BASE_URL}/models`, { signal: AbortSignal.timeout(2500) });
+      if (probe.ok) {
+        const data = await probe.json().catch(() => null);
+        local.reachable = true;
+        local.models = Array.isArray(data?.data)
+          ? data.data.map(m => m.id).filter(Boolean).slice(0, 50)
+          : [];
+        local.modelPresent = local.models.length ? local.models.includes(LOCAL_MODEL) : null;
+      } else {
+        local.error = `HTTP ${probe.status}`;
+      }
+    } catch (e) {
+      local.error = (e.name === "TimeoutError" || e.name === "AbortError")
+        ? "timed out after 2.5s"
+        : (e.message || "unreachable");
+    }
+
+    // The fallback order the server would actually attempt right now, with
+    // providers that are out of credit omitted.
+    const chain = [];
+    const pushCloud = () => {
+      if (GROQ_KEYS.length && !cloudBreakerOpen("groq")) chain.push(`groq:${GROQ_MODEL}`);
+      if (XAI_KEYS.length && !cloudBreakerOpen("xai")) chain.push(`xai:${XAI_MODEL}`);
+    };
+    const pushLocal = () => { if (LOCAL_MODEL) chain.push(`local:${LOCAL_MODEL}`); };
+    if (AI_PROVIDER === "local") pushLocal();
+    else if (AI_PROVIDER === "auto") { pushLocal(); pushCloud(); }
+    else if (AI_PROVIDER === "contingency") { pushCloud(); pushLocal(); }
+    else pushCloud();
+
+    return sendJson(200, {
+      providerMode: AI_PROVIDER,
+      modes: ["contingency", "auto", "local", "groq"],
+      cloud: {
+        groq: { keys: GROQ_KEYS.length, model: GROQ_MODEL },
+        xai: { keys: XAI_KEYS.length, model: XAI_MODEL }
+      },
+      local,
+      breaker: cloudBreakerState(),
+      effectiveChain: chain,
+      // True when the offline path is genuinely usable, not merely configured.
+      contingencyReady: !!(LOCAL_MODEL && local.reachable)
+    });
+  }
+
   if (url.pathname === "/api/chat") {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
@@ -971,41 +1272,40 @@ const server = http.createServer(async (req, res) => {
       messages
     });
 
-    // One candidate per key: the proxy tries Groq keys first (each in turn,
-    // moving on when a key is rate-limited / rejected) and falls through to the
-    // xAI (Grok) key pool when EVERY Groq key fails. A single local candidate
-    // is used for AI_PROVIDER=local.
+    // Candidate pools. The local model is built once and then placed in the
+    // chain according to the provider mode (see the `phases` list below):
+    //   local       → local only
+    //   auto        → local first, cloud fallback
+    //   contingency → cloud first, LOCAL LAST RESORT
+    const localCandidate = LOCAL_MODEL ? {
+      url: LOCAL_BASE_URL + "/chat/completions",
+      body: makeBody(LOCAL_MODEL),
+      headers: { "Content-Type": "application/json" },
+      label: "local model",
+      model: LOCAL_MODEL
+    } : null;
+
     let groqCandidates = [];
     let xaiCandidates = [];
     let localCandidates = [];
     if (provider === "local") {
-      if (!LOCAL_MODEL) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: { message: "LOCAL_MODEL is not set on the server" } }));
+      if (!localCandidate) {
+        return sendJson(500, { error: { message: "LOCAL_MODEL is not set on the server" } });
       }
-      localCandidates = [{
-        url: LOCAL_BASE_URL + "/chat/completions",
-        body: makeBody(LOCAL_MODEL),
-        headers: { "Content-Type": "application/json" },
-        label: "local model",
-        model: LOCAL_MODEL
-      }];
-      groqCandidates = localCandidates;
+      localCandidates = [localCandidate];
+      groqCandidates = localCandidates; // the single-phase path below reads this
     } else {
-      // Auto (default): try the local model first when one is configured,
-      // then fall back to the Groq/xAI key pools below.
-      if (provider === "auto" && LOCAL_MODEL) {
-        localCandidates = [{
-          url: LOCAL_BASE_URL + "/chat/completions",
-          body: makeBody(LOCAL_MODEL),
-          headers: { "Content-Type": "application/json" },
-          label: "local model",
-          model: LOCAL_MODEL
-        }];
+      if ((provider === "auto" || provider === "contingency") && localCandidate) {
+        localCandidates = [localCandidate];
       }
       if (!GROQ_KEYS.length && !XAI_KEYS.length && !localCandidates.length) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: { message: "GROQ_API_KEY / GROQ_API_KEYS (or XAI_API_KEY / XAI_API_KEYS) is not set (set them in the environment or config.js)" } }));
+        return sendJson(500, {
+          error: {
+            message: "No AI provider configured. Set GROQ_API_KEY / GROQ_API_KEYS " +
+              "(or XAI_API_KEY / XAI_API_KEYS) in the environment or config.js, or install a " +
+              "local model — see LOCAL_AI_CONTINGENCY.md."
+          }
+        });
       }
       groqCandidates = GROQ_KEYS.map(key => ({
         url: "https://api.groq.com/openai/v1/chat/completions",
@@ -1036,22 +1336,51 @@ const server = http.createServer(async (req, res) => {
       let lastKeyErr = null; // { status, text } of the last rate-limited/rejected key
       let allKeyIssues = true;
 
-      // Phase order: auto → local model first, then Groq keys (starting from
-      // the last key that worked), then xAI (Grok) keys - only reached when
-      // every earlier option is unreachable/exhausted.
-      const phases = provider === "local"
-        ? [{ candidates: groqCandidates, cursor: () => 0, setCursor: () => {} }]
-        : [
-            ...(provider === "auto"
-              ? [{ candidates: localCandidates, cursor: () => 0, setCursor: () => {} }]
-              : []),
-            { candidates: groqCandidates, cursor: () => groqKeyCursor, setCursor: (i) => { groqKeyCursor = i; } },
-            { candidates: xaiCandidates, cursor: () => xaiKeyCursor, setCursor: (i) => { xaiKeyCursor = i; } }
-          ];
+      // Phase order:
+      //   local       → local model only
+      //   auto        → local first, then Groq keys, then xAI keys
+      //   contingency → Groq keys, then xAI keys, then LOCAL AS LAST RESORT
+      //                 (a provider whose credit breaker is open is skipped)
+      //   groq/other  → cloud pools only
+      const localPhase = { candidates: localCandidates, cursor: () => 0, setCursor: () => {} };
+      const cloudPhases = [
+        { candidates: groqCandidates, cursor: () => groqKeyCursor, setCursor: (i) => { groqKeyCursor = i; }, providerKey: "groq" },
+        { candidates: xaiCandidates, cursor: () => xaiKeyCursor, setCursor: (i) => { xaiKeyCursor = i; }, providerKey: "xai" }
+      ];
+
+      let phases;
+      if (provider === "local") {
+        phases = [localPhase];
+      } else if (provider === "auto") {
+        phases = [localPhase, ...cloudPhases];
+      } else if (provider === "contingency") {
+        phases = [...cloudPhases, localPhase];
+      } else {
+        phases = cloudPhases;
+      }
+
+      // Nothing left to try: contingency is configured but no local model is
+      // installed and every cloud provider is out of credit. Say so plainly
+      // instead of failing with a generic upstream error.
+      if (provider === "contingency" && !localCandidates.length
+          && CLOUD_PROVIDERS.every(p => cloudBreakerOpen(p))) {
+        return sendJson(503, {
+          error: {
+            message: "Cloud AI credit is exhausted and no local contingency model is available. " +
+              "Start a local model and set LOCAL_MODEL (see LOCAL_AI_CONTINGENCY.md)."
+          }
+        });
+      }
 
       for (const phase of phases) {
         const list = phase.candidates;
         if (!list.length) continue;
+        // Skip a cloud provider whose credit breaker is open — including one
+        // that tripped earlier in this very request.
+        if (phase.providerKey && cloudBreakerOpen(phase.providerKey)) {
+          console.warn(`[proxy] skipping ${phase.providerKey} (credit breaker open); next phase`);
+          continue;
+        }
         const start = phase.cursor() % list.length;
         for (let i = 0; i < list.length; i++) {
           const idx = (start + i) % list.length;
@@ -1069,15 +1398,30 @@ const server = http.createServer(async (req, res) => {
             console.warn(`[proxy] ${cand.label} candidate ${idx + 1}/${list.length} failed: ${e.message}`);
             continue;
           }
-          // Key-related failures (rate limit / invalid key) → try the next key.
-          // In auto mode a failed/unreachable LOCAL model is also non-terminal:
-          // it just means "move on to the cloud pools".
+          // Provider-level failure → try the next key, then the next phase.
+          // For a CLOUD provider any 4xx/5xx counts: the request body is built
+          // here, so a 400 means the provider rejected our key/model/parameters
+          // rather than the client sending something malformed. Treating those
+          // as terminal (as this proxy used to) meant a provider that answers
+          // "bad key" with a 400 instead of a 401 would hand the user a raw
+          // upstream error and the contingency would never engage.
+          // A failed or unreachable LOCAL model is non-terminal in auto and
+          // contingency mode too: it just means "move to the next phase".
           const fromLocal = cand.label === "local model";
-          const keyIssue = provider !== "local" && !fromLocal && [401, 403, 429].includes(upRes.status);
-          if (!upRes.ok && (keyIssue || (fromLocal && provider === "auto"))) {
-            await upRes.text().catch(() => ""); // drain so the connection can be reused
+          const keyIssue = provider !== "local" && !fromLocal && upRes.status >= 400;
+          const localSkippable = fromLocal && (provider === "auto" || provider === "contingency");
+          if (!upRes.ok && (keyIssue || localSkippable)) {
+            const errText = await upRes.text().catch(() => ""); // drain so the connection can be reused
             if (keyIssue) {
-              lastKeyErr = { status: upRes.status, text: "" };
+              // Out of credit rather than merely throttled → trip this
+              // provider's breaker and abandon its remaining keys. The outer
+              // loop then skips the rest of the cloud phases and lands on the
+              // local contingency model.
+              if (noteCloudCreditFailure(phase.providerKey, upRes.status, errText)) {
+                upRes = null;
+                break;
+              }
+              lastKeyErr = { status: upRes.status, text: errText.slice(0, 500) };
               console.warn(`[proxy] ${cand.label} key ${idx + 1}/${list.length} returned ${upRes.status}; trying next key`);
             } else {
               lastErr = new Error(`${cand.label} returned ${upRes.status}`);

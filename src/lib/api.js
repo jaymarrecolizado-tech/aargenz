@@ -21,6 +21,10 @@ export const api = {
   register: (username, password) => req("api/auth/register", { method: "POST", body: { username, password } }),
   login: (username, password) => req("api/auth/login", { method: "POST", body: { username, password } }),
   logout: () => req("api/auth/logout", { method: "POST" }),
+  // Self-service password change: requires the current password and revokes
+  // every other session.
+  changePassword: (currentPassword, newPassword) =>
+    req("api/auth/password", { method: "POST", body: { currentPassword, newPassword } }),
 
   listReports: (all) => req(`api/reports${all ? "?all=1" : ""}`),
   getReport: (id) => req(`api/reports/${id}`),
@@ -54,6 +58,10 @@ export const api = {
 
   getTemplateConfig: (templateId) => req(`api/templates/${templateId}`),
   saveTemplate: (config) => req(`api/templates/${config.id}`, { method: "PUT", body: config }),
+
+  // AI provider status (admin): configured providers, whether the local
+  // contingency model is actually reachable, and the credit-breaker state.
+  aiStatus: () => req("api/ai/status"),
 
   // Default header/footer logos per template (Phase 8.4): stored server-side
   // under templates/<id>/ and referenced from template.json.

@@ -1,10 +1,14 @@
 // AI provider plumbing shared by the app. Lets you swap the live Groq-hosted
 // model for a local model (Ollama / LM Studio / llama.cpp / vLLM) via the
-// OpenAI-compatible chat completions API. See LOCAL_AI_PLAN.md.
+// OpenAI-compatible chat completions API. See LOCAL_AI_PLAN.md and
+// LOCAL_AI_CONTINGENCY.md.
 //
-//   AI_PROVIDER: "groq"  → cloud only via Groq API (default)
-//                "local" → local only (errors if unreachable)
-//                "auto"  → local first, Groq fallback
+//   AI_PROVIDER: "contingency" → cloud first, LOCAL AS LAST RESORT (recommended
+//                                for production — the office keeps working when
+//                                the token budget runs out)
+//                "groq"        → cloud only via Groq API (then xAI, OpenRouter)
+//                "local"       → local only (errors if unreachable)
+//                "auto"        → local first, cloud fallback (fine-tune work)
 //   LOCAL_BASE_URL: base URL of the local OpenAI-compatible server
 //   LOCAL_MODEL: model name served by the local server
 
@@ -236,8 +240,8 @@ const groqStream = async (messages, onToken) => {
 // Sends the conversation to the model, streaming tokens to onToken as they
 // arrive. Resolution order:
 //   1. /api/chat proxy (server mode) – routes to local model or Groq.
-//   2. No proxy (file:// / static): local model directly ("local"/"auto"),
-//      then Groq direct, then OpenRouter as a final cloud fallback.
+//   2. No proxy (file:// / static): the attempts are ordered to match the
+//      configured mode, then OpenRouter as a final cloud fallback.
 export const streamChat = async (messages, onToken, overrides = {}) => {
   const cfg = effectiveAiConfig(overrides);
 
@@ -259,31 +263,44 @@ export const streamChat = async (messages, onToken, overrides = {}) => {
     console.warn("Proxy unavailable:", e.message);
   }
 
-  if (cfg.AI_PROVIDER !== "groq") {
+  const tryLocal = async () => {
+    const res = await fetchWithTimeout(cfg.LOCAL_BASE_URL + "/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: openAiBody(messages, cfg.LOCAL_MODEL, {
+        stream: true,
+        // Phase 6: strict JSON mode is a local-only opt-in (fine-tuned models).
+        ...(cfg.LOCAL_JSON_MODE ? { response_format: { type: "json_object" } } : {})
+      })
+    }, cfg.LOCAL_TIMEOUT_MS);
+    return readCompletion(res, onToken);
+  };
+  const tryCloud = () => groqStream(messages, onToken);
+
+  // Attempt order per mode. "contingency" deliberately puts the local model
+  // LAST so normal operation runs on the cloud and the offline model is only
+  // reached once the cloud is out of credit or unreachable.
+  const mode = cfg.AI_PROVIDER;
+  const attempts =
+    mode === "local" ? [["local", tryLocal]] :
+    mode === "groq" ? [["cloud", tryCloud]] :
+    mode === "contingency" ? [["cloud", tryCloud], ["local", tryLocal]] :
+    /* auto */ [["local", tryLocal], ["cloud", tryCloud]];
+
+  let lastErr = null;
+  for (const [kind, run] of attempts) {
     try {
-      const res = await fetchWithTimeout(cfg.LOCAL_BASE_URL + "/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: openAiBody(messages, cfg.LOCAL_MODEL, {
-          stream: true,
-          // Phase 6: strict JSON mode is a local-only opt-in (fine-tuned models).
-          ...(cfg.LOCAL_JSON_MODE ? { response_format: { type: "json_object" } } : {})
-        })
-      }, cfg.LOCAL_TIMEOUT_MS);
-      return await readCompletion(res, onToken);
+      return await run();
     } catch (e) {
-      if (cfg.AI_PROVIDER === "local") throw e; // strict local mode
-      console.warn("Local model unavailable, falling back to cloud:", e.message);
+      lastErr = e;
+      if (kind === "local" && mode === "local") throw e; // strict local mode
+      console.warn(`${kind} attempt failed, trying the next provider:`, e.message);
     }
   }
 
-  try {
-    return await groqStream(messages, onToken);
-  } catch (groqErr) {
-    if (CONFIG()?.OPENROUTER_API_KEY) {
-      console.warn("Groq unavailable, trying OpenRouter:", groqErr.message);
-      return await openrouterStream(messages, onToken);
-    }
-    throw groqErr;
+  if (CONFIG()?.OPENROUTER_API_KEY) {
+    console.warn("All primary providers failed, trying OpenRouter:", lastErr?.message);
+    return await openrouterStream(messages, onToken);
   }
+  throw lastErr || new Error("All AI providers failed");
 };

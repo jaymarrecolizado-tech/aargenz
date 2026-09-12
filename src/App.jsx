@@ -6,6 +6,7 @@ import TemplatePicker from "./components/TemplatePicker.jsx";
 import LoginPanel from "./components/LoginPanel.jsx";
 import MyReports from "./components/MyReports.jsx";
 import AdminPanel from "./components/AdminPanel.jsx";
+import ChangePassword from "./components/ChangePassword.jsx";
 import { printReport, exportRtf } from "./components/PdfRenderer.jsx";
 import { extractJson, normalizeReport, validateReportSchema, validateRawLlmJson, extractProgress, isCompleteProgress, mergeProgress } from "./lib/report.js";
 import { streamChat, loadAiOverrides, AI_DEFAULTS } from "./lib/aiClient.js";
@@ -108,6 +109,8 @@ export default function App() {
   // Phase 6 bulk generation: how many reports were completed this session —
   // shown next to the New Report button so encoders can chain activities.
   const [sessionDone, setSessionDone] = useState(0);
+  // P0: self-service password change modal.
+  const [showPassword, setShowPassword] = useState(false);
   const [headerGallery, setHeaderGallery] = useState(() => loadGallery(HEADER_GALLERY_KEY));
   const [footerGallery, setFooterGallery] = useState(() => loadGallery(FOOTER_GALLERY_KEY));
   const fileRef = useRef(null);
@@ -496,7 +499,7 @@ export default function App() {
       data-theme={theme}
       style={{
       minHeight:"100vh",
-      display:"flex", flexDirection:"column"
+      display:"flex", flexDirection:"column", position:"relative"
     }}>
       <div className="hdr">
         <div>
@@ -581,6 +584,9 @@ export default function App() {
           <span className="chip">
             {user.username} <span style={{opacity:0.6}}>({user.role})</span>
           </span>
+          <button onClick={() => setShowPassword(true)} className="hbtn small" title="Change your own password">
+            Password
+          </button>
           <button onClick={handleLogout} className="hbtn small">
             Sign out
           </button>
@@ -669,6 +675,8 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {showPassword && <ChangePassword onClose={() => setShowPassword(false)}/>}
 
       <style>{`
         @keyframes bounce { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }

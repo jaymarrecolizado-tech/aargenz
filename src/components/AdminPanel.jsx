@@ -13,7 +13,7 @@ export default function AdminPanel({ templates, onPersonnelSaved, user }) {
       <div className="panel" style={{padding:"24px"}}>
         <div style={{fontSize:"17px", fontWeight:"700", color:"var(--text)", marginBottom:"4px"}}>Administration</div>
         <div style={{display:"flex", gap:"8px", margin:"12px 0 16px"}}>
-          {[["users","Users"],["personnel","Personnel"],["templates","Templates"],["audit","Audit Log"]].map(([s, lbl]) => (
+          {[["users","Users"],["personnel","Personnel"],["templates","Templates"],["ai","AI"],["audit","Audit Log"]].map(([s, lbl]) => (
             <button key={s} onClick={() => setSection(s)} className={"seg" + (section === s ? " active" : "")}>{lbl}</button>
           ))}
         </div>
@@ -22,6 +22,8 @@ export default function AdminPanel({ templates, onPersonnelSaved, user }) {
           ? <PersonnelEditor templates={templates} onSaved={onPersonnelSaved}/>
           : section === "users"
           ? <UserManagement currentUser={user}/>
+          : section === "ai"
+          ? <AiStatusPanel/>
           : section === "audit"
           ? <AuditLogViewer/>
           : (
@@ -250,4 +252,93 @@ function AuditLogViewer() {
 const cellInput = {
   width:"100%", padding:"7px 10px", borderRadius:"6px", border:"1px solid #ccd5f0", fontSize:"13px"
 };
+
+// AI provider status (LOCAL_AI_CONTINGENCY.md): which providers are configured,
+// whether the offline fallback is actually reachable right now, and whether the
+// cloud credit breaker has tripped. This is the panel you open when someone
+// reports "the chat stopped working".
+function AiStatusPanel() {
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    setError("");
+    api.aiStatus()
+      .then(setStatus)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  const badge = (ok, label) => (
+    <span style={{
+      display:"inline-block", padding:"2px 9px", borderRadius:"10px", fontSize:"11px", fontWeight:"600",
+      background: ok ? "#e6f4ea" : "#fdecea", color: ok ? "#137333" : "#b71c1c"
+    }}>{label}</span>
+  );
+
+  const row = (label, value) => (
+    <div style={{display:"flex", gap:"10px", padding:"7px 0", borderBottom:"1px solid var(--border)", fontSize:"13px"}}>
+      <div style={{width:"150px", color:"var(--muted)", flexShrink:0}}>{label}</div>
+      <div style={{color:"var(--text)", wordBreak:"break-word"}}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px"}}>
+        <div style={{fontSize:"13px", fontWeight:"600", color:"var(--text)"}}>AI provider &amp; contingency</div>
+        <button onClick={load} className="mini-btn" style={{marginLeft:"auto"}} disabled={loading}>
+          {loading ? "Checking…" : "↻ Re-check"}
+        </button>
+      </div>
+      {error && <div style={{background:"#fdecea", color:"#b71c1c", borderRadius:"8px", padding:"8px 12px", fontSize:"12px", marginBottom:"12px"}}>{error}</div>}
+      {!status && !error && <div style={{color:"var(--muted)", fontSize:"13px"}}>Loading…</div>}
+      {status && (
+        <>
+          <div style={{marginBottom:"12px"}}>
+            {badge(!!status.contingencyReady,
+              status.contingencyReady ? "Offline fallback ready" : "Offline fallback NOT ready")}
+          </div>
+          {row("Provider mode", <code>{status.providerMode}</code>)}
+          {row("Active chain", (status.effectiveChain || []).length
+            ? status.effectiveChain.map((c, i) => <div key={i}><code>{c}</code></div>)
+            : "—")}
+          {row("Groq", `${status.cloud?.groq?.keys ?? 0} key(s) · ${status.cloud?.groq?.model || "—"}`)}
+          {row("xAI", `${status.cloud?.xai?.keys ?? 0} key(s) · ${status.cloud?.xai?.model || "—"}`)}
+          {row("Local endpoint", <code>{status.local?.baseUrl}</code>)}
+          {row("Local reachable", status.local?.reachable
+            ? badge(true, "yes")
+            : <>{badge(false, "no")} <span style={{color:"var(--muted)"}}>{status.local?.error || ""}</span></>)}
+          {row("Contingency model", <>
+            <code>{status.local?.model}</code>
+            {status.local?.modelPresent === false && (
+              <div style={{color:"#b71c1c", fontSize:"12px", marginTop:"4px"}}>
+                Not installed on the local server. Run: <code>ollama pull {status.local.model}</code>
+              </div>
+            )}
+          </>)}
+          {status.local?.models?.length > 0 && row("Available locally", status.local.models.join(", "))}
+          {row("Credit breaker", status.breaker?.providers
+            ? Object.entries(status.breaker.providers).map(([p, b]) => (
+                <div key={p} style={{marginBottom:"3px"}}>
+                  <code>{p}</code>: {b.open
+                    ? <span style={{color:"#b71c1c"}}>OPEN — {b.reason}, resumes in {b.resumesInSeconds}s</span>
+                    : <span style={{color:"#137333"}}>closed</span>}
+                </div>
+              ))
+            : "—")}
+          <div style={{fontSize:"11px", color:"var(--muted)", marginTop:"14px"}}>
+            With <b>contingency</b> mode the office runs on Groq and silently falls through to the local
+            model when cloud credit runs out or every key is rejected. Model picks by hardware are in{" "}
+            <code>LOCAL_AI_CONTINGENCY.md</code>.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 

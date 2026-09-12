@@ -9,3 +9,5 @@ _*.json
 _*.log
 # Large reference PDFs used while designing templates
 Reference/
+# Local agent workspace state (memory logs, scratch) — not shared source
+.workbuddy-ai/
