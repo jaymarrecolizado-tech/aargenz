@@ -390,8 +390,21 @@ merely *correct*.
 | 2.6 Photos out of the `reports` row | ✅ implemented (`0004`, `migrate:photos`) |
 | 2.8 Autosave retry queue + unload guard | ✅ implemented |
 | 3.2 Automatic control numbers | ✅ implemented |
-| 2.7 Optimistic concurrency on autosave | ⏳ open |
-| 3.1, 3.3–3.6, 4.x, 5.x | ⏳ open |
+| 3.4 Duplicate report | ⚠️ works, but not to spec (see below) |
+| 2.7 Optimistic concurrency on autosave | ⏳ open — **the last P0 item** |
+| 3.1, 3.3, 3.5, 3.6, 4.x, 5.x | ⏳ open |
+
+**3.4 correction.** The status table previously listed this as open, but
+"Duplicate" has existed in `MyReports.jsx` since Phase 6.3 and works. It does
+*not* match what §3.4 specifies, though: the spec asks the copy to reset
+`title`, `dateTime`, `controlNo` and clear photos, whereas the implementation
+copies everything and only appends " (copy)" to the title. The control number
+*is* handled correctly — the server overwrites the copied `controlNo` with a
+freshly issued one — so the gap is `dateTime` (the copy inherits the original's
+activity date, which is how a report ends up filed under the wrong date) and
+the photos (a duplicate carrying the original's documentation is arguably
+misleading). Small fix, worth folding into whichever item comes next.
+
 
 Items 2.6, 2.8 and 3.2 landed in `c357c4f`. Notes on the implementation:
 
