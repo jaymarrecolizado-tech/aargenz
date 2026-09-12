@@ -228,7 +228,20 @@ try {
   const spa = await call("GET", "/some/spa/route");
   check("SPA fallback serves html", spa.status === 200 && /text\/html/.test(spa.h.get("content-type") ?? ""), `ct=${spa.h.get("content-type")}`);
   check("GET /config.js -> 200 js", (await call("GET", "/config.js")).status === 200);
+  check("GET /config.js served as js", /javascript/.test((await call("GET", "/config.js")).h.get("content-type") ?? ""));
+  const logoAsset = await call("GET", "/templates/aar-ilcdb/header-logo.png");
+  check("GET template logo -> 200 image", logoAsset.status === 200 && /image\/png/.test(logoAsset.h.get("content-type") ?? ""), `ct=${logoAsset.h.get("content-type")}`);
   check("unknown /api/* -> 404 not html", (await call("GET", "/api/definitely-not-a-route")).status === 404);
+
+  // The project root is not a document root: source and config must not be
+  // reachable. Each of these used to return the file's real contents.
+  for (const leaked of ["/server.js", "/db.js", "/package.json", "/package-lock.json", "/Plan.md", "/vite.config.js", "/server/config.js"]) {
+    const r = await call("GET", leaked);
+    const body = r.text.slice(0, 200);
+    const isSource = /node:fs|getPool|"name":\s*"aar-generator"|createServer|mysql2|export const/.test(body);
+    check(`root file not served: ${leaked}`, !isSource, `status=${r.status} ct=${r.h.get("content-type")}`);
+  }
+  check("GET /pics not served", !/JFIF|PNG/.test((await call("GET", "/pics")).text.slice(0, 40)));
 
   // --------------------------------------------------------- I. 413 cap
   const big = "x".repeat(33 * 1024 * 1024);

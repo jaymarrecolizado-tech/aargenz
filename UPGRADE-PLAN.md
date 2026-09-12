@@ -46,6 +46,7 @@ that a government report process normally requires.
 | 2.6 | Move photos out of the `reports` JSON row | High | M | **P0** |
 | 2.7 | Optimistic concurrency on autosave | Med | M | **P1** |
 | 2.8 | Autosave retry queue + unload guard | Med | S | **P1** |
+| 2.9 | Static handler exposed the whole project root | **Critical** | S | ✅ **done** |
 | 3.1 | Approval / review workflow | High | L | **P1** |
 | 3.2 | Auto-generated control numbers | High | M | **P1** |
 | 3.3 | Admin dashboard / analytics | High | M | **P1** |
@@ -159,6 +160,44 @@ On error the client only sets `syncState = "error"` (`App.jsx:192`) and shows
 "Offline" in the header. There is no retry queue and no `beforeunload` guard — a user
 on flaky office Wi-Fi can close the tab believing their work is safe. Queue the
 failed payload, retry on `online` / next edit, and block unload while unsaved.
+
+### 2.9 Static handler served the whole project root — ✅ fixed
+
+Found while smoke-testing the 5.1 split, not in the original review. The static
+handler's project-root fallback was written to serve `config.js` "and other root
+assets", but it placed **no restriction on which files** it would serve. Anything
+that existed in the project root was downloadable:
+
+```
+GET /server.js      -> 200  the entire server source
+GET /db.js          -> 200  the MySQL pool + connection logic
+GET /package.json   -> 200  dependency inventory
+GET /Plan.md        -> 200  internal planning notes
+GET /config.js      -> 200  ...which is the documented key file
+```
+
+`config.js` is the worst of these: it is gitignored *because it holds API keys*,
+its own first line says so, and it contains a live `GROQ_API_KEY` plus an
+`XAI_API_KEYS` array. The client genuinely needs it — `index.html` has
+`<script src="./config.js">` and `src/lib/aiClient.js` reads `window.CONFIG` to
+call Groq/xAI directly from the browser — so it cannot simply be removed from the
+allowlist without also moving those calls to the server-side `/api/chat` proxy
+(which already exists and already rotates keys).
+
+**What this fix does:** the project root stops being a document root. Only
+`/config.js`, `/index.html` and `/templates/**` may be served from it — the only
+root paths the built app actually requests at runtime. `dist/` remains the real
+document root, and the SPA fallback is unchanged. Verified: the seven paths above
+now return the app shell instead of source, while `/config.js` still serves as
+`text/javascript` and `/templates/<id>/header-logo.png` still serves as `image/png`.
+
+**Still open, and a decision for you:** shipping `config.js` at all means the Groq
+and xAI keys are readable by anyone who loads the page. That is fine on an
+air-gapped office LAN and not fine on a public VPS. The server-side `/api/chat`
+proxy already does everything the browser path does, so the clean fix is to stop
+populating keys in `config.js` and route all AI calls through `/api/chat`. I did
+**not** make that change — it alters the app's AI architecture and is yours to
+call. `DEPLOYMENT.md` should say which model is intended either way.
 
 ---
 
@@ -438,6 +477,7 @@ merely *correct*.
 | 3.2 Automatic control numbers | ✅ implemented |
 | 2.7 Optimistic concurrency + create idempotency | ✅ implemented (`0005`) |
 | 3.4 Duplicate report | ✅ implemented |
+| 2.9 Static handler exposed the whole project root | ✅ fixed (root allowlist) |
 | 5.1 Split `server.js` into route modules | ✅ implemented (21 modules) |
 | 3.1, 3.3, 3.5, 3.6, 4.x, 5.2–5.6 | ⏳ open |
 
