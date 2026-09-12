@@ -390,20 +390,35 @@ merely *correct*.
 | 2.6 Photos out of the `reports` row | ✅ implemented (`0004`, `migrate:photos`) |
 | 2.8 Autosave retry queue + unload guard | ✅ implemented |
 | 3.2 Automatic control numbers | ✅ implemented |
-| 3.4 Duplicate report | ⚠️ works, but not to spec (see below) |
-| 2.7 Optimistic concurrency on autosave | ⏳ open — **the last P0 item** |
+| 2.7 Optimistic concurrency + create idempotency | ✅ implemented (`0005`) |
+| 3.4 Duplicate report | ✅ implemented |
 | 3.1, 3.3, 3.5, 3.6, 4.x, 5.x | ⏳ open |
 
-**3.4 correction.** The status table previously listed this as open, but
-"Duplicate" has existed in `MyReports.jsx` since Phase 6.3 and works. It does
-*not* match what §3.4 specifies, though: the spec asks the copy to reset
-`title`, `dateTime`, `controlNo` and clear photos, whereas the implementation
-copies everything and only appends " (copy)" to the title. The control number
-*is* handled correctly — the server overwrites the copied `controlNo` with a
-freshly issued one — so the gap is `dateTime` (the copy inherits the original's
-activity date, which is how a report ends up filed under the wrong date) and
-the photos (a duplicate carrying the original's documentation is arguably
-misleading). Small fix, worth folding into whichever item comes next.
+**All P0 items are now done.** 2.7 and 3.4 landed in the commit that follows
+`c357c4f`. Notes on the last two:
+
+- **2.7** — `reports.version` is a monotonic `INT`, not `updated_at`, because
+  `updated_at` is a one-second `TIMESTAMP`: two saves inside the same second
+  would look identical and the check would pass when it should not. The guard
+  rides *inside* the UPDATE (`... WHERE id = ? AND version = ?`), so there is no
+  read-then-write window. A mismatch returns `409` with
+  `code: "version_conflict"` and the current version; the client shows a banner
+  offering **Reload theirs** / **Keep mine**. A 409 is deliberately **not**
+  retried — re-sending the same payload is exactly the overwrite the guard
+  exists to prevent.
+- **2.7 also needed create idempotency**, which the original plan item didn't
+  mention. The retry queue added in 2.8 captures its payload at failure time, so
+  a create whose *response* was lost (the flaky-Wi-Fi case) would have been
+  retried with no `reportId` and filed the same draft twice. The client now
+  generates the report id and reuses it, and the server returns the existing row
+  instead of inserting a second. Verified with 40 truly-parallel identical
+  creates: 1 × `201`, 39 × `200 deduplicated`, exactly one row, zero errors.
+  Control numbers may now have **gaps** — a loser that races past the existence
+  check reserves a sequence number and then discards it. A gap is preferable to
+  a duplicate, and it is documented in the code.
+- **3.4** — the copy now resets `dateTime` (plus the per-template time-of-day
+  fields) and no longer carries the original's photos. The control number was
+  already correct, since the server issues a fresh one.
 
 
 Items 2.6, 2.8 and 3.2 landed in `c357c4f`. Notes on the implementation:

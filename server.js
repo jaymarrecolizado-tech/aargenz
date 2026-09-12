@@ -329,6 +329,26 @@ function controlNumberField(tplCfg) {
   return field && tplCfg.controlPrefix ? field : null;
 }
 
+// ---- Optimistic concurrency (plan 2.7) ------------------------------------
+// Autosave used to be last-write-wins: two tabs (or a laptop and a desktop)
+// silently overwrote each other, and a queued retry could resurrect a payload
+// captured up to a minute earlier. Clients now send the version they loaded and
+// a mismatch is rejected with 409 so the user chooses which copy to keep.
+//
+// reports.version is a monotonic INT rather than updated_at, because
+// updated_at is a one-second TIMESTAMP: two saves inside the same second would
+// look identical and the check would pass when it should not.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Parses the client's expected version. Returns undefined when the client
+// didn't send one (older client, or a path that doesn't track versions) so the
+// caller can skip the check instead of rejecting the write.
+function expectedVersion(body) {
+  if (!body || body.version == null) return undefined;
+  const n = Number(body.version);
+  return Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
 // ---- Report photos (plan 2.6) ----------------------------------------------
 // Photos live in report_photos instead of inside the reports row, so a draft
 // carrying 1.5-3 MB of base64 no longer rides along with every report read and
@@ -1239,6 +1259,7 @@ const server = http.createServer(async (req, res) => {
         }
         const [rows] = await pool.query(
           `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.control_no, r.status,
+                  r.version,
                   (SELECT COUNT(*) FROM report_photos p WHERE p.report_id = r.id) AS photos_count,
                   r.created_at, r.updated_at
            FROM reports r LEFT JOIN users u ON u.id = r.owner
@@ -1254,7 +1275,27 @@ const server = http.createServer(async (req, res) => {
         if (!body.templateId) {
           return sendJson(400, { error: { message: "templateId is required" } });
         }
-        const id = crypto.randomUUID();
+        // Idempotent create (plan 2.7). The client generates the id and reuses it
+        // when retrying a save whose response was lost, so a retry returns the
+        // row that already exists instead of filing a second copy of the draft.
+        // Checked BEFORE the control number is reserved so a retry doesn't burn
+        // a sequence number.
+        const requestedId = typeof body.id === "string" && UUID_RE.test(body.id) ? body.id : null;
+        const id = requestedId || crypto.randomUUID();
+        if (requestedId) {
+          const [dupe] = await pool.query(
+            "SELECT owner, control_no, version FROM reports WHERE id = ?", [id]
+          );
+          if (dupe.length) {
+            // Never confirm the existence of another user's report.
+            if (dupe[0].owner !== user.id) {
+              return sendJson(409, { error: { message: "That report id is already in use" } });
+            }
+            return sendJson(200, {
+              id, controlNo: dupe[0].control_no, version: dupe[0].version, deduplicated: true
+            });
+          }
+        }
         const checked = sanitizeReportPayload(body.report, body.templateId);
         if (checked.error) return sendJson(422, checked.error);
 
@@ -1271,20 +1312,38 @@ const server = http.createServer(async (req, res) => {
           if (checked.report) checked.report[cnField.id] = controlNo;
         }
 
-        await pool.query(
-          `INSERT INTO reports (id, owner, template_id, title, control_no, status, conversation, report)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            id,
-            user.id,
-            String(body.templateId),
-            body.title != null ? String(body.title) : null,
-            controlNo,
-            body.status === "final" ? "final" : "draft",
-            body.conversation != null ? JSON.stringify(body.conversation) : null,
-            checked.report != null ? JSON.stringify(checked.report) : null
-          ]
-        );
+        try {
+          await pool.query(
+            `INSERT INTO reports (id, owner, template_id, title, control_no, status, conversation, report)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              id,
+              user.id,
+              String(body.templateId),
+              body.title != null ? String(body.title) : null,
+              controlNo,
+              body.status === "final" ? "final" : "draft",
+              body.conversation != null ? JSON.stringify(body.conversation) : null,
+              checked.report != null ? JSON.stringify(checked.report) : null
+            ]
+          );
+        } catch (e) {
+          // Two identical creates raced past the existence check above. The
+          // loser returns the winner's row instead of a 500 — that is the whole
+          // point of the idempotency key. The sequence number it reserved is
+          // simply left unused, which is why control numbers may have gaps.
+          if (e?.code === "ER_DUP_ENTRY" && requestedId) {
+            const [dupe] = await pool.query(
+              "SELECT owner, control_no, version FROM reports WHERE id = ?", [id]
+            );
+            if (dupe.length && dupe[0].owner === user.id) {
+              return sendJson(200, {
+                id, controlNo: dupe[0].control_no, version: dupe[0].version, deduplicated: true
+              });
+            }
+          }
+          throw e;
+        }
         // Photos go to their own table (2.6). Accepted here so a client that
         // still sends them on create keeps working.
         if (Array.isArray(body.photos) && body.photos.length) {
@@ -1296,7 +1355,7 @@ const server = http.createServer(async (req, res) => {
         writeAudit(user, "report.create", {
           detail: `${id} — ${body.title || "untitled"} (${body.templateId})${controlNo ? ` [${controlNo}]` : ""}`
         });
-        return sendJson(201, { id, controlNo });
+        return sendJson(201, { id, controlNo, version: 1 });
       }
 
       if (reportId) {
@@ -1338,7 +1397,7 @@ const server = http.createServer(async (req, res) => {
       }
       // Update mutable fields.
       if (req.method === "PUT" && reportId) {
-        const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
+        const [rows] = await pool.query("SELECT owner, version FROM reports WHERE id = ?", [reportId]);
         if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
         if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
         const sets = [];
@@ -1358,16 +1417,38 @@ const server = http.createServer(async (req, res) => {
         if (!sets.length && !("photos" in body)) {
           return sendJson(400, { error: { message: "Nothing to update" } });
         }
+        // Optimistic concurrency (plan 2.7). The version check rides inside the
+        // UPDATE so there is no read-then-write window: if another client saved
+        // in the meantime, affectedRows is 0 and we hand back 409 with the
+        // current version so the user can choose which copy to keep.
+        const expect = expectedVersion(body);
+        let newVersion = rows[0].version;
         if (sets.length) {
+          const guarded = expect !== undefined;
+          const sql = `UPDATE reports SET ${sets.join(", ")}, version = version + 1 WHERE id = ?`
+            + (guarded ? " AND version = ?" : "");
           params.push(reportId);
-          await pool.query(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, params);
+          if (guarded) params.push(expect);
+          const [r] = await pool.query(sql, params);
+          if (guarded && r.affectedRows === 0) {
+            const [[cur]] = await pool.query("SELECT version FROM reports WHERE id = ?", [reportId]);
+            return sendJson(409, {
+              error: {
+                message: "This report was changed somewhere else since you opened it. "
+                  + "Reload the other version, or keep yours and overwrite it."
+              },
+              code: "version_conflict",
+              version: cur?.version ?? null
+            });
+          }
+          newVersion = guarded ? expect + 1 : rows[0].version + 1;
         }
         if ("photos" in body && Array.isArray(body.photos)) {
           const saved = await replaceReportPhotos(pool, reportId, body.photos);
           if (saved.error) return sendJson(422, saved.error);
         }
         writeAudit(user, "report.update", { detail: reportId });
-        return sendJson(200, { ok: true });
+        return sendJson(200, { ok: true, version: newVersion });
       }
       // Delete a report. report_photos rows go with it via ON DELETE CASCADE.
       if (req.method === "DELETE" && reportId) {

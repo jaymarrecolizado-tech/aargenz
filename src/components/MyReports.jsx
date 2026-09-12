@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 
+// Fields that identify *when* an activity took place. A duplicate describes a
+// new activity, so these are reset rather than carried over (plan 3.4) — the
+// same set the bundled templates use (`dateTime` everywhere, plus a time-of-day
+// field in two of them).
+const ACTIVITY_TIME_FIELDS = ["dateTime", "time", "timeOfArrival"];
+
 // "My Reports" list (Phase 3.3): open, duplicate, or delete saved drafts.
 export default function MyReports({ user, onOpen }) {
   const [reports, setReports] = useState(null);
@@ -48,22 +54,23 @@ export default function MyReports({ user, onOpen }) {
 
   const duplicate = async (r) => {
     try {
-      // Photos are no longer part of the report payload (plan 2.6), so fetch
-      // them alongside it or the copy would silently lose its documentation.
-      const [full, photoRes] = await Promise.all([
-        api.getReport(r.id),
-        api.getPhotos(r.id).catch(() => ({ photos: [] }))
-      ]);
-      const photos = (photoRes?.photos || [])
-        .map(p => (typeof p === "string" ? p : p.dataUrl))
-        .filter(Boolean);
+      // Photos are deliberately NOT copied (plan 3.4): a duplicate is for a new
+      // activity, so the original's documentation would be misleading. Fetching
+      // them would also be wasted work, since 2.6 moved them to their own table.
+      const full = await api.getReport(r.id);
+      const report = { ...(full.report || {}) };
+      // Reset the fields that identify *when* the activity happened, otherwise
+      // the copy is filed under the original's date (plan 3.4). All four
+      // bundled templates use `dateTime`; two add a time-of-day field.
+      for (const key of ACTIVITY_TIME_FIELDS) if (key in report) report[key] = "";
+      // The control number is re-issued by the server on create (plan 3.2), so
+      // whatever the original carried is overwritten — no need to blank it here.
       await api.createReport({
         templateId: full.template_id,
         title: full.title ? full.title + " (copy)" : "Copy of report",
         status: "draft",
         conversation: full.conversation,
-        report: full.report,
-        photos
+        report
       });
       load();
     } catch (e) {

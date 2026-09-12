@@ -10,6 +10,12 @@ async function req(path, { method = "GET", body } = {}) {
   const data = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error(data?.error?.message || `Request failed (${res.status})`);
+    // Callers need the status and body, not just the message: a 409 on save
+    // means someone else changed the report and the UI has to offer a choice
+    // (plan 2.7), and it carries the current version to retry against.
+    err.status = res.status;
+    err.code = data?.error?.code || data?.code || null;
+    err.body = data;
     if (data?.error?.details) err.details = data.error.details;
     throw err;
   }

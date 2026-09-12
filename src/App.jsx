@@ -67,6 +67,25 @@ const stripFences = (t) => String(t || "").replace(/```(?:json)?[\s\S]*?```/gi, 
 const controlNoFieldId = (tpl) =>
   (tpl?.fields || []).find(f => f && f.auto === "controlNumber")?.id || null;
 
+// Idempotency key for report creation (plan 2.7). The client picks the id so a
+// retry after a lost response returns the row that already exists instead of
+// filing the draft twice. crypto.randomUUID needs a secure context (https or
+// localhost) and some staging boxes serve plain http, so degrade gracefully —
+// the server validates the shape and falls back to its own id if it's unusable.
+const makeId = () => {
+  try {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    if (globalThis.crypto?.getRandomValues) {
+      const b = globalThis.crypto.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    }
+  } catch { /* fall through to the non-UUID form */ }
+  return `draft-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+};
+
 // True when a stored field value carries any real content (recurses into
 // arrays/objects so blank scaffolding like {name:"",position:""} is empty).
 const hasContent = (v) => {
@@ -81,7 +100,11 @@ export default function App() {
   // undefined = still checking the session; null = logged out; object = user.
   const [user, setUser] = useState(undefined);
   const [reportId, setReportId] = useState(null); // server-side draft id
-  const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error
+  // Set when the server answered 409: holds the other copy's version plus the
+  // payload we tried to write, so "keep mine" can re-send it against the new
+  // version without the user retyping anything.
+  const [conflict, setConflict] = useState(null);
+  const [syncState, setSyncState] = useState("idle"); // idle | saving | saved | error | conflict
   const [templates, setTemplates] = useState(null);
   const [templateId, setTemplateId] = useState(SAVED_STATE?.templateId || loadSavedTemplateId() || "aar-elgu");
   // Active template: server registry once loaded, bundled default before that.
@@ -129,6 +152,22 @@ export default function App() {
   // True when the photo set changed locally and hasn't been pushed to the
   // server yet (plan 2.6 keeps photos out of the normal autosave payload).
   const photosDirtyRef = useRef(false);
+  // Stable id for the draft currently being composed, generated on first save
+  // and reused for every create retry so the server can deduplicate (2.7).
+  const draftIdRef = useRef(null);
+  // The version this tab last saw from the server (plan 2.7). Deliberately a
+  // ref and not state: the autosave effect depends on the values it saves, and
+  // a version in state would make every successful save retrigger the effect —
+  // bumping the version again, forever.
+  const reportVersionRef = useRef(null);
+  // Clears the per-draft identity. Call alongside setReportId(null) whenever a
+  // new draft begins, or the next report would inherit the previous id and the
+  // server would hand back the old row instead of creating one.
+  const resetDraftIdentity = () => {
+    draftIdRef.current = null;
+    reportVersionRef.current = null;
+    setConflict(null);
+  };
   const markManualEdit = (path) => { manualEditsRef.current.add(String(path).split(".")[0]); };
   const resetManualEdits = () => { manualEditsRef.current = new Set(); };
 
@@ -196,6 +235,23 @@ export default function App() {
     setSyncState("saved");
   };
 
+  // A 409 is deliberately NOT retryable: the server holds a newer copy, so
+  // re-sending the same payload is exactly the stale overwrite the version
+  // check exists to prevent. Park the payload and let the user decide.
+  const noteConflict = (payload, version) => {
+    clearTimeout(retryTimerRef.current);
+    retryDelayRef.current = 0;
+    pendingSaveRef.current = null;
+    setConflict({ version: version ?? null, payload: payload || null });
+    setSyncState("conflict");
+  };
+
+  // The server bumps the version on every write, so adopt whatever it reports
+  // or the next save would be rejected against our own previous write.
+  const applySaved = (res) => {
+    if (res?.version != null) reportVersionRef.current = res.version;
+  };
+
   const scheduleRetry = () => {
     retryDelayRef.current = Math.min(retryDelayRef.current ? retryDelayRef.current * 2 : 2000, 60000);
     clearTimeout(retryTimerRef.current);
@@ -210,10 +266,13 @@ export default function App() {
       setSyncState("saving");
       if (pending) {
         if (pending.reportId) {
-          await api.updateReport(pending.reportId, pending.payload);
+          applySaved(await api.updateReport(pending.reportId, pending.payload));
         } else {
           const created = await api.createReport(pending.payload);
-          if (created?.id) setReportId(created.id);
+          if (created?.id) {
+            setReportId(created.id);
+            applySaved(created);
+          }
         }
         pendingSaveRef.current = null;
       }
@@ -223,6 +282,10 @@ export default function App() {
       }
       settleSyncState();
     } catch (e) {
+      if (e?.status === 409) {
+        noteConflict(pending?.payload, e.body?.version);
+        return;
+      }
       console.error("Draft sync retry failed:", e);
       setSyncState("error");
       scheduleRetry();
@@ -246,7 +309,7 @@ export default function App() {
   // Warn before closing the tab while a save is in flight or has failed.
   useEffect(() => {
     const onBeforeUnload = (e) => {
-      if (syncState === "saving" || syncState === "error" || hasPendingSave()) {
+      if (syncState === "saving" || syncState === "error" || syncState === "conflict" || hasPendingSave()) {
         e.preventDefault();
         e.returnValue = "";
         return "";
@@ -273,13 +336,24 @@ export default function App() {
         conversation: messages,
         report: reportData
       };
+      // Concurrency tokens (plan 2.7). On a new draft the client supplies the
+      // id so a retry after a lost response returns the existing row rather
+      // than filing a second copy; on an existing one it supplies the version
+      // so the server can reject a write that would clobber a newer copy.
+      if (reportId) {
+        if (reportVersionRef.current != null) payload.version = reportVersionRef.current;
+      } else {
+        if (!draftIdRef.current) draftIdRef.current = makeId();
+        payload.id = draftIdRef.current;
+      }
       try {
         if (reportId) {
-          await api.updateReport(reportId, payload);
+          applySaved(await api.updateReport(reportId, payload));
         } else {
           const created = await api.createReport(payload);
           if (created?.id) {
             setReportId(created.id);
+            applySaved(created);
             // The control number is issued by the server (plan 3.2) so two
             // encoders can never collide on one. Surface it in the preview
             // straight away instead of waiting for a reload.
@@ -293,6 +367,12 @@ export default function App() {
         clearTimeout(retryTimerRef.current);
         settleSyncState();
       } catch (e) {
+        // Someone else saved a newer copy. Do not queue a retry — re-sending
+        // the same payload is precisely the overwrite the guard prevents.
+        if (e?.status === 409) {
+          noteConflict(payload, e.body?.version);
+          return;
+        }
         console.error("Draft sync failed:", e);
         // Queue the payload instead of dropping the work, and retry with backoff.
         pendingSaveRef.current = { reportId, payload };
@@ -336,6 +416,11 @@ export default function App() {
     setMessages(full.conversation?.length ? full.conversation : [tpl.initialMessage || initialMessage]);
     setReportData(full.report ? normalizeReport(full.report, tpl) : null);
     setReportId(full.id);
+    // Adopt the loaded version so the next save is checked against the copy we
+    // actually have, and clear any conflict banner from the previous report.
+    reportVersionRef.current = full.version ?? null;
+    draftIdRef.current = null;
+    setConflict(null);
     setTab(full.report ? "preview" : "chat");
     // Photos come from their own endpoint (plan 2.6) so opening a report no
     // longer drags megabytes through the report payload. Clearing the dirty
@@ -349,8 +434,44 @@ export default function App() {
       .catch(() => { /* report still opens without its photos */ });
   };
 
-  const handleLogout = async () => {
-    try { await api.logout(); } catch { /* ignore */ }
+  // ---- Conflict resolution (plan 2.7) --------------------------------------
+  // "Keep mine": re-send the payload we parked, pinned to the version the
+  // server reported. This is the one path that intentionally overwrites the
+  // other copy, and only ever runs because the user chose it.
+  const keepMine = () => {
+    const parked = conflict;
+    setConflict(null);
+    if (!parked?.payload) { setSyncState("idle"); return; }
+    reportVersionRef.current = parked.version;
+    const payload = { ...parked.payload };
+    if (parked.version != null) payload.version = parked.version;
+    pendingSaveRef.current = { reportId, payload };
+    flushPendingSave();
+  };
+
+  // "Reload theirs": drop the local edits and take the server's copy.
+  const reloadTheirs = async () => {
+    try {
+      const full = await api.getReport(reportId);
+      setConflict(null);
+      reportVersionRef.current = full.version ?? null;
+      resetManualEdits();
+      setMessages(full.conversation?.length ? full.conversation : [initialMessage]);
+      setReportData(full.report ? normalizeReport(full.report, template) : null);
+      photosDirtyRef.current = false;
+      api.getPhotos(full.id)
+        .then(res => setPhotos(
+          (res?.photos || []).map(p => (typeof p === "string" ? p : p.dataUrl)).filter(Boolean)
+        ))
+        .catch(() => { /* report still loads without its photos */ });
+      setSyncState("saved");
+    } catch (e) {
+      console.error("Conflict reload failed:", e);
+      setSyncState("error");
+    }
+  };
+
+  const handleLogout = async () => {    try { await api.logout(); } catch { /* ignore */ }
     clearState();
     setUser(null);
     resetManualEdits();
@@ -359,6 +480,7 @@ export default function App() {
     setPhotos([]);
     photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
+    resetDraftIdentity();
     setTab("chat");
   };
 
@@ -376,6 +498,7 @@ export default function App() {
     setPhotos([]);
     photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
+    resetDraftIdentity();
     setSyncState("idle");
     setTab("chat");
   };
@@ -397,6 +520,7 @@ export default function App() {
     setPhotos([]);
     photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
+    resetDraftIdentity();
     setSyncState("idle");
     setTab("chat");
   };
@@ -722,10 +846,19 @@ export default function App() {
             {footerGallery.map((src, i) => <option key={i} value={src}>{`Preset ${i + 1}`}</option>)}
           </select>
           <span className="hdr-sep" />
-          <span title={syncState === "error" ? "Could not reach the server — your work is still saved in this browser" : "Draft sync status"} style={{
-            fontSize:"11px", color: syncState === "error" ? "#ff9e9e" : "rgba(255,255,255,0.55)", minWidth:"52px"
+          <span title={
+            syncState === "error" ? "Could not reach the server — your work is still saved in this browser"
+              : syncState === "conflict" ? "This report was changed somewhere else — choose which copy to keep"
+                : "Draft sync status"
+          } style={{
+            fontSize:"11px",
+            color: syncState === "error" ? "#ff9e9e" : syncState === "conflict" ? "#ffd08a" : "rgba(255,255,255,0.55)",
+            minWidth:"52px"
           }}>
-            {syncState === "saving" ? "Saving…" : syncState === "saved" ? "Saved" : syncState === "error" ? "Offline" : ""}
+            {syncState === "saving" ? "Saving…"
+              : syncState === "saved" ? "Saved"
+                : syncState === "error" ? "Offline"
+                  : syncState === "conflict" ? "Changed" : ""}
           </span>
           <span className="chip">
             {user.username} <span style={{opacity:0.6}}>({user.role})</span>
@@ -741,6 +874,25 @@ export default function App() {
       <input ref={fileRef} type="file" multiple accept="image/*" style={{display:"none"}} onChange={handlePhotos}/>
       <input ref={headerRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleHeaderUpload}/>
       <input ref={footerRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFooterUpload}/>
+
+      {conflict && (
+        <div role="alert" style={{
+          display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
+          padding:"10px 24px", background:"#FAEEDA", borderBottom:"1px solid #BA7517",
+          color:"#633806", fontSize:"12px"
+        }}>
+          <span style={{flex:"1 1 320px"}}>
+            This report was changed somewhere else — another tab or another device saved a
+            newer version. Reload theirs, or keep yours and overwrite it.
+          </span>
+          <button onClick={reloadTheirs} className="hbtn small" style={{background:"#fff", color:"#633806", border:"1px solid #BA7517"}}>
+            Reload theirs
+          </button>
+          <button onClick={keepMine} className="hbtn small" style={{background:"#BA7517", color:"#fff", border:"1px solid #BA7517"}}>
+            Keep mine
+          </button>
+        </div>
+      )}
 
       <div className="page-pad" style={{flex:1, overflow:"auto", padding:"24px", display:"flex", justifyContent:"center"}}>
         {tab === "chat" ? (
