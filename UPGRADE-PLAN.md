@@ -387,11 +387,27 @@ merely *correct*.
 | 2.4 Expired-session sweep | ✅ implemented |
 | 2.5 Self-service password change (+ header modal) | ✅ implemented |
 | 3.7 Offline AI contingency + `/api/ai/status` + Admin → AI tab | ✅ implemented |
-| 2.6 Photos out of the `reports` row | ⏳ needs a migration |
+| 2.6 Photos out of the `reports` row | ✅ implemented (`0004`, `migrate:photos`) |
+| 2.8 Autosave retry queue + unload guard | ✅ implemented |
+| 3.2 Automatic control numbers | ✅ implemented |
 | 2.7 Optimistic concurrency on autosave | ⏳ open |
-| 2.8 Autosave retry queue + unload guard | ⏳ open |
-| 3.1–3.6, 4.x, 5.x | ⏳ open |
+| 3.1, 3.3–3.6, 4.x, 5.x | ⏳ open |
 
-Two items from this plan remain genuinely urgent: **2.6** (photos are still
-1.5–3 MB per report inside the row, so every read and autosave ships megabytes)
-and **3.2** (control numbers are still typed by hand).
+Items 2.6, 2.8 and 3.2 landed in `c357c4f`. Notes on the implementation:
+
+- **2.6** — `report_photos` (MEDIUMBLOB, `ON DELETE CASCADE`) replaces the
+  base64 data URLs that used to ride along with every autosave. `reports.photos`
+  is deliberately kept as a **read fallback** so reports saved before the
+  migration keep rendering; `npm run migrate:photos` backfills and clears it.
+  Run that once per environment after deploying `0004`.
+- **3.2** — the sequence is reserved with `LAST_INSERT_ID(expr)` on a single
+  pooled connection, which is what makes concurrent creates collision-free
+  (verified: 12 simultaneous creates → `S13`–`S24`, no duplicates). Templates
+  opt in with `"auto": "controlNumber"` on a field plus a `controlPrefix`.
+- **2.8** — report and photo saves share one retry queue, so "Saved" is only
+  shown once both have landed. Photo failures previously only reached the
+  console, which is how a user could close the tab believing photos were safe.
+
+The one part of the plan that still needs a **deploy-time** action is the photo
+backfill above. Everything else is code-only.
+
