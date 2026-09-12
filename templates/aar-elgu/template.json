@@ -5,6 +5,7 @@
   "pdfTemplate": "AAR-template.pdf",
   "headerLogo": "templates/aar-elgu/header-logo.png",
   "footerLogo": "templates/aar-elgu/footer-logo.png",
+  "controlPrefix": "eLGU-R2",
   "initialMessage": {
     "role": "assistant",
     "content": "Hello! I'll help you create your Accomplishment Activity Report. Let's start — what is the **title of the activity**?"
@@ -31,6 +32,8 @@
       "id": "controlNo",
       "label": "Control number",
       "type": "text",
+      "manual": true,
+      "auto": "controlNumber",
       "example": "\"eLGU-R2-12-04-2025-S157\""
     },
     {

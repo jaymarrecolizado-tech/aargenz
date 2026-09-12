@@ -53,9 +53,10 @@ export const longformFields = (template) => (template.fields || []).filter(f => 
 export const listFields = (template) => (template.fields || []).filter(f => f.type === "list");
 export const personFields = (template) => (template.fields || []).filter(f => f.type === "person");
 // Manual fields are filled by the user (dropdowns/editing), never collected
-// by the AI — keeps prompts and answers shorter.
+// by the AI — keeps prompts and answers shorter. Auto fields are filled by the
+// server (e.g. the control number), so the AI must not ask for those either.
 export const chatFields = (template) =>
-  (template.fields || []).filter(f => !f.manual);
+  (template.fields || []).filter(f => !f.manual && !f.auto);
 export const beneficiariesField = (template) => findField(template, "beneficiaries");
 
 export const beneficiaryCategories = (template) =>

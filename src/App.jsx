@@ -62,6 +62,11 @@ const setDeep = (root, keys, value) => {
 // Hides the model's ```json progress blocks (Phase 7.3) from chat display.
 const stripFences = (t) => String(t || "").replace(/```(?:json)?[\s\S]*?```/gi, "").trim();
 
+// Id of the template's server-issued control-number field, or null when the
+// template doesn't use automatic numbering (plan 3.2).
+const controlNoFieldId = (tpl) =>
+  (tpl?.fields || []).find(f => f && f.auto === "controlNumber")?.id || null;
+
 // True when a stored field value carries any real content (recurses into
 // arrays/objects so blank scaffolding like {name:"",position:""} is empty).
 const hasContent = (v) => {
@@ -121,6 +126,9 @@ export default function App() {
   // assistant from re-asking, and completion merges keep hand edits from being
   // wiped when the model emits its final report JSON.
   const manualEditsRef = useRef(new Set());
+  // True when the photo set changed locally and hasn't been pushed to the
+  // server yet (plan 2.6 keeps photos out of the normal autosave payload).
+  const photosDirtyRef = useRef(false);
   const markManualEdit = (path) => { manualEditsRef.current.add(String(path).split(".")[0]); };
   const resetManualEdits = () => { manualEditsRef.current = new Set(); };
 
@@ -166,8 +174,92 @@ export default function App() {
     "Untitled report"
   );
 
+  // ---- Autosave retry (plan 2.8) ------------------------------------------
+  // A failed save used to be dropped after setting "Offline" in the header. On
+  // flaky office Wi-Fi that meant a user could close the tab believing their
+  // work was safe. Failures are now queued and retried with backoff, an
+  // immediate retry happens when the browser comes back online, and the tab
+  // warns before closing while anything is unsaved.
+  const pendingSaveRef = useRef(null);   // { reportId, payload }
+  const pendingPhotosRef = useRef(null); // { reportId, photos } — synced separately (2.6)
+  const retryTimerRef = useRef(null);
+  const retryDelayRef = useRef(0);
+
+  const hasPendingSave = () => !!(pendingSaveRef.current || pendingPhotosRef.current);
+
+  // Only claim "saved" once *both* queues are empty. The report and its photos
+  // sync over separate requests, so a successful report save must not clear the
+  // indicator while a photo upload is still outstanding or has failed.
+  const settleSyncState = () => {
+    if (hasPendingSave()) return;
+    retryDelayRef.current = 0;
+    setSyncState("saved");
+  };
+
+  const scheduleRetry = () => {
+    retryDelayRef.current = Math.min(retryDelayRef.current ? retryDelayRef.current * 2 : 2000, 60000);
+    clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = setTimeout(flushPendingSave, retryDelayRef.current);
+  };
+
+  async function flushPendingSave() {
+    const pending = pendingSaveRef.current;
+    const pendingPhotos = pendingPhotosRef.current;
+    if ((!pending && !pendingPhotos) || !user) return;
+    try {
+      setSyncState("saving");
+      if (pending) {
+        if (pending.reportId) {
+          await api.updateReport(pending.reportId, pending.payload);
+        } else {
+          const created = await api.createReport(pending.payload);
+          if (created?.id) setReportId(created.id);
+        }
+        pendingSaveRef.current = null;
+      }
+      if (pendingPhotos) {
+        await api.savePhotos(pendingPhotos.reportId, pendingPhotos.photos);
+        pendingPhotosRef.current = null;
+      }
+      settleSyncState();
+    } catch (e) {
+      console.error("Draft sync retry failed:", e);
+      setSyncState("error");
+      scheduleRetry();
+    }
+  }
+
+  useEffect(() => {
+    const onOnline = () => {
+      if (!hasPendingSave()) return;
+      retryDelayRef.current = 0;
+      clearTimeout(retryTimerRef.current);
+      flushPendingSave();
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  useEffect(() => () => clearTimeout(retryTimerRef.current), []);
+
+  // Warn before closing the tab while a save is in flight or has failed.
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (syncState === "saving" || syncState === "error" || hasPendingSave()) {
+        e.preventDefault();
+        e.returnValue = "";
+        return "";
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [syncState]);
+
   // Server-side autosave (Phase 3.3): debounced create/update of a draft
-  // holding the conversation, report data and photos.
+  // holding the conversation and report data. Photos are deliberately NOT in
+  // this payload any more (plan 2.6) — they sync separately below, so a 2 MB
+  // photo set no longer rides along with every save.
   useEffect(() => {
     if (!user) return;
     const hasContent = messages.length > 1 || !!reportData;
@@ -179,25 +271,61 @@ export default function App() {
         title: draftTitle(),
         status: reportData ? "final" : "draft",
         conversation: messages,
-        report: reportData,
-        photos
+        report: reportData
       };
       try {
         if (reportId) {
           await api.updateReport(reportId, payload);
         } else {
           const created = await api.createReport(payload);
-          if (created?.id) setReportId(created.id);
+          if (created?.id) {
+            setReportId(created.id);
+            // The control number is issued by the server (plan 3.2) so two
+            // encoders can never collide on one. Surface it in the preview
+            // straight away instead of waiting for a reload.
+            const cnId = controlNoFieldId(template);
+            if (created.controlNo && cnId) {
+              setReportData(prev => (prev ? { ...prev, [cnId]: created.controlNo } : prev));
+            }
+          }
         }
-        setSyncState("saved");
+        pendingSaveRef.current = null;
+        clearTimeout(retryTimerRef.current);
+        settleSyncState();
       } catch (e) {
         console.error("Draft sync failed:", e);
+        // Queue the payload instead of dropping the work, and retry with backoff.
+        pendingSaveRef.current = { reportId, payload };
         setSyncState("error");
+        scheduleRetry();
       }
     }, 800);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, messages, reportData, photos, reportId, template.id]);
+  }, [user, messages, reportData, reportId, template.id]);
+
+  // Photo sync (plan 2.6): only fires when the photo set actually changed, and
+  // only once the report row exists to attach them to. A failure used to be
+  // logged and forgotten, so the user could close the tab believing their
+  // photos were safe; it now queues and retries like the report save.
+  useEffect(() => {
+    if (!user || !reportId || !photosDirtyRef.current) return;
+    const t = setTimeout(async () => {
+      try {
+        await api.savePhotos(reportId, photos);
+        photosDirtyRef.current = false;
+        pendingPhotosRef.current = null;
+        settleSyncState();
+      } catch (e) {
+        console.error("Photo sync failed:", e);
+        pendingPhotosRef.current = { reportId, photos };
+        setSyncState("error");
+        scheduleRetry();
+      }
+    }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, reportId, photos]);
 
   const handleOpenSaved = (full) => {
     const tpl = getTemplate(templates || [getBuiltinTemplate("aar-elgu")], full.template_id);
@@ -207,9 +335,18 @@ export default function App() {
     resetManualEdits();
     setMessages(full.conversation?.length ? full.conversation : [tpl.initialMessage || initialMessage]);
     setReportData(full.report ? normalizeReport(full.report, tpl) : null);
-    setPhotos(Array.isArray(full.photos) ? full.photos : []);
     setReportId(full.id);
     setTab(full.report ? "preview" : "chat");
+    // Photos come from their own endpoint (plan 2.6) so opening a report no
+    // longer drags megabytes through the report payload. Clearing the dirty
+    // flag first stops the sync effect from echoing them straight back.
+    photosDirtyRef.current = false;
+    setPhotos([]);
+    api.getPhotos(full.id)
+      .then(res => setPhotos(
+        (res?.photos || []).map(p => (typeof p === "string" ? p : p.dataUrl)).filter(Boolean)
+      ))
+      .catch(() => { /* report still opens without its photos */ });
   };
 
   const handleLogout = async () => {
@@ -220,6 +357,7 @@ export default function App() {
     setMessages([initialMessage]);
     setReportData(null);
     setPhotos([]);
+    photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
     setTab("chat");
   };
@@ -236,6 +374,7 @@ export default function App() {
     setMessages([next.initialMessage || initialMessage]);
     setReportData(null);
     setPhotos([]);
+    photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
     setSyncState("idle");
     setTab("chat");
@@ -256,6 +395,7 @@ export default function App() {
     setMessages([initialMessage]);
     setReportData(null);
     setPhotos([]);
+    photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
     setSyncState("idle");
     setTab("chat");
@@ -420,10 +560,15 @@ export default function App() {
     if (files.length > room) {
       window.alert(`Only ${room} more photo${room === 1 ? "" : "s"} allowed (max ${MAX_PHOTOS}). The extra ${files.length - room} will be skipped.`);
     }
+    let added = 0;
     for (const f of files.slice(0, room)) {
       const dataUrl = await compressImage(f);
-      if (dataUrl) setPhotos(prev => (prev.length < MAX_PHOTOS ? [...prev, dataUrl] : prev));
+      if (dataUrl) {
+        added++;
+        setPhotos(prev => (prev.length < MAX_PHOTOS ? [...prev, dataUrl] : prev));
+      }
     }
+    if (added) photosDirtyRef.current = true; // triggers the separate photo sync
   };
 
   const changePhotoLayout = (layout) => {
@@ -479,6 +624,7 @@ export default function App() {
   };
 
   const removePhoto = (index) => {
+    photosDirtyRef.current = true;
     setPhotos(prev => prev.filter((_, i) => i !== index));
   };
 

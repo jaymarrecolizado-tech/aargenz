@@ -32,6 +32,12 @@ export const api = {
   updateReport: (id, patch) => req(`api/reports/${id}`, { method: "PUT", body: patch }),
   deleteReport: (id) => req(`api/reports/${id}`, { method: "DELETE" }),
 
+  // Photos live in their own table (plan 2.6), so a 2 MB photo set no longer
+  // rides along with every report read and every autosave. Replace-all keeps
+  // ordering intact and makes drag-to-reorder a client-only change later.
+  getPhotos: (id) => req(`api/reports/${id}/photos`),
+  savePhotos: (id, photos) => req(`api/reports/${id}/photos`, { method: "PUT", body: { photos } }),
+
   // Reports list → CSV download (Phase 6). Returns the raw blob so the caller
   // controls the filename; admins pass all=true to include everyone's reports.
   exportReportsCsv: async (all) => {

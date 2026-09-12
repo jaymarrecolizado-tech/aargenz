@@ -247,7 +247,7 @@ const csvCell = (v) => {
 // Arrays of objects become counts, arrays of scalars are joined with "; ",
 // nested objects are stringified — so mixed templates still fit one sheet.
 function reportsToCsv(rows) {
-  const META = ["id", "owner_name", "template_id", "title", "status", "created_at", "updated_at"];
+  const META = ["id", "owner_name", "template_id", "title", "control_no", "status", "created_at", "updated_at"];
   const parsed = rows.map(r => {
     let rep = r.report;
     if (typeof rep === "string") { try { rep = JSON.parse(rep); } catch { rep = null; } }
@@ -255,7 +255,13 @@ function reportsToCsv(rows) {
   });
   const fieldSet = new Set();
   for (const r of parsed) for (const k of Object.keys(r._rep)) fieldSet.add(k);
-  const fields = [...fieldSet].filter(k => k !== "photos"); // data URLs don't belong in a sheet
+  // "photos" holds base64 data URLs, which don't belong in a sheet. A report
+  // field whose id matches a META column (e.g. "title") would otherwise produce
+  // a duplicate header — Excel can't tell the two apart and lookups break — so
+  // those get a "report_" prefix to keep every column name unique.
+  const fields = [...fieldSet]
+    .filter(k => k !== "photos")
+    .map(k => ({ key: k, header: META.includes(k) ? `report_${k}` : k }));
   const cell = (v) => {
     if (v == null) return "";
     if (Array.isArray(v)) {
@@ -264,14 +270,146 @@ function reportsToCsv(rows) {
     if (typeof v === "object") return JSON.stringify(v);
     return v;
   };
-  const lines = [[...META, ...fields].map(csvCell).join(",")];
+  const lines = [[...META, ...fields.map(f => f.header)].map(csvCell).join(",")];
   for (const r of parsed) {
     lines.push(
-      [...META.map(m => r[m]), ...fields.map(f => cell(r._rep[f]))].map(csvCell).join(",")
+      [...META.map(m => r[m]), ...fields.map(f => cell(r._rep[f.key]))].map(csvCell).join(",")
     );
   }
   // UTF-8 BOM so Excel detects the encoding when the file is opened directly.
   return "\uFEFF" + lines.join("\r\n");
+}
+
+// ---- Control numbers (plan 3.2) -------------------------------------------
+// Templates opt in by marking a field with "auto": "controlNumber" and giving
+// the template a controlPrefix. The number is issued by the server so two
+// encoders can never produce the same one, and it is stored in
+// reports.control_no (UNIQUE) rather than buried in the report JSON.
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// Reserves the next sequence number for (template, year). LAST_INSERT_ID(expr)
+// is per-connection, so both statements must run on the same pooled connection
+// to be atomic under concurrent creates.
+async function reserveControlSeq(pool, templateId, year) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.query(
+      `INSERT INTO control_sequences (template_id, year, last_seq)
+       VALUES (?, ?, LAST_INSERT_ID(1))
+       ON DUPLICATE KEY UPDATE last_seq = LAST_INSERT_ID(last_seq + 1)`,
+      [templateId, year]
+    );
+    const [[row]] = await conn.query("SELECT LAST_INSERT_ID() AS seq");
+    return Number(row?.seq) || 1;
+  } finally {
+    conn.release();
+  }
+}
+
+// "eLGU-R2" + 157 → "eLGU-R2-12-04-2025-S157"
+function formatControlNo(prefix, seq, when = new Date()) {
+  const stamp = `${pad2(when.getMonth() + 1)}-${pad2(when.getDate())}-${when.getFullYear()}`;
+  return `${prefix}-${stamp}-S${seq}`;
+}
+
+function readTemplateConfig(templateId) {
+  try {
+    return JSON.parse(
+      fs.readFileSync(path.join(__dirname, "templates", String(templateId), "template.json"), "utf8")
+    );
+  } catch {
+    return null;
+  }
+}
+
+// Returns the control-number field when the template is set up for automatic
+// numbering, otherwise null (most templates have no control number at all).
+function controlNumberField(tplCfg) {
+  const field = (tplCfg?.fields || []).find(f => f && f.auto === "controlNumber");
+  return field && tplCfg.controlPrefix ? field : null;
+}
+
+// ---- Report photos (plan 2.6) ----------------------------------------------
+// Photos live in report_photos instead of inside the reports row, so a draft
+// carrying 1.5-3 MB of base64 no longer rides along with every report read and
+// every autosave. The client sends data URLs; they are decoded and stored as
+// bytes so the DB no longer pays the ~33% base64 overhead either.
+const MAX_REPORT_PHOTOS = Number(process.env.MAX_REPORT_PHOTOS || 10);
+const MAX_PHOTO_BYTES = Number(process.env.MAX_PHOTO_BYTES || 3 * 1024 * 1024);
+const DATA_URL_RE = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i;
+
+// Returns { photos: [{ mime, bytes, caption }] } or { error }.
+function parsePhotoPayload(items) {
+  if (!Array.isArray(items)) return { photos: [] };
+  if (items.length > MAX_REPORT_PHOTOS) {
+    return { error: { message: `A report can hold at most ${MAX_REPORT_PHOTOS} photos` } };
+  }
+  const photos = [];
+  for (const item of items) {
+    const dataUrl = typeof item === "string" ? item : item?.dataUrl;
+    const caption = item && typeof item === "object" && item.caption != null
+      ? String(item.caption).slice(0, 255)
+      : null;
+    const m = DATA_URL_RE.exec(String(dataUrl || ""));
+    if (!m) return { error: { message: "Each photo must be a base64 image data URL" } };
+    const bytes = Buffer.from(m[2].replace(/\s+/g, ""), "base64");
+    if (bytes.length > MAX_PHOTO_BYTES) {
+      return { error: { message: `A photo exceeds the ${Math.round(MAX_PHOTO_BYTES / 1048576)} MB limit` } };
+    }
+    photos.push({ mime: m[1].toLowerCase(), bytes, caption });
+  }
+  return { photos };
+}
+
+// Replaces a report's whole photo set in one transaction. Replace-all keeps the
+// client simple (it just sends the current array) and preserves ordering, so
+// drag-to-reorder works later without a schema change.
+async function replaceReportPhotos(pool, reportId, items) {
+  const parsed = parsePhotoPayload(items);
+  if (parsed.error) return parsed;
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query("DELETE FROM report_photos WHERE report_id = ?", [reportId]);
+    for (let i = 0; i < parsed.photos.length; i++) {
+      const p = parsed.photos[i];
+      await conn.query(
+        "INSERT INTO report_photos (report_id, seq, mime, bytes, caption) VALUES (?, ?, ?, ?, ?)",
+        [reportId, i, p.mime, p.bytes, p.caption]
+      );
+    }
+    // Clear the legacy column so the two stores can never disagree.
+    await conn.query("UPDATE reports SET photos = NULL WHERE id = ?", [reportId]);
+    await conn.commit();
+    return { count: parsed.photos.length };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+// Reads a report's photos as data URLs, falling back to the legacy
+// reports.photos column so reports saved before the migration keep working
+// until scripts/migrate-photos.js has moved them.
+async function loadReportPhotos(pool, reportId) {
+  const [rows] = await pool.query(
+    "SELECT seq, mime, bytes, caption FROM report_photos WHERE report_id = ? ORDER BY seq",
+    [reportId]
+  );
+  if (rows.length) {
+    return rows.map(r => ({
+      dataUrl: `data:${r.mime};base64,${Buffer.from(r.bytes).toString("base64")}`,
+      caption: r.caption || ""
+    }));
+  }
+  const [legacy] = await pool.query("SELECT photos FROM reports WHERE id = ?", [reportId]);
+  let arr = legacy[0]?.photos;
+  if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch { arr = null; } }
+  return Array.isArray(arr)
+    ? arr.filter(u => typeof u === "string").map(u => ({ dataUrl: u, caption: "" }))
+    : [];
 }
 
 // ---- Template config management (Phase 8.3) ------------------------------
@@ -302,6 +440,11 @@ function validateTemplateConfig(tpl) {
       if (!f || !VALID_FIELD_TYPES.includes(f.type)) {
         errors.push(`fields[${i}].type must be one of: ${VALID_FIELD_TYPES.join(", ")}`);
       }
+      // "auto" marks a field the SERVER fills (currently only the control
+      // number) — it is excluded from chat collection and the model's schema.
+      if (f?.auto != null && f.auto !== "controlNumber") {
+        errors.push(`fields[${i}].auto must be "controlNumber" when set`);
+      }
       if (Array.isArray(f?.itemFields)) f.itemFields.forEach((sf, j) => {
         if (!sf || !/^[\w-]+$/.test(sf.id || "")) errors.push(`fields[${i}].itemFields[${j}].id is invalid`);
       });
@@ -319,6 +462,17 @@ function validateTemplateConfig(tpl) {
     if (v != null && v !== "" && !/^(templates\/[\w-]+\/[\w-]+\.(png|jpg|jpeg|webp|svg))$/.test(String(v))) {
       errors.push(`${key} must be a path under templates/<id>/ (png/jpg/webp/svg)`);
     }
+  }
+  // Automatic control numbers (plan 3.2): the prefix is the leading segment of
+  // the issued number, e.g. "eLGU-R2" → "eLGU-R2-12-04-2025-S157".
+  const wantsAutoControlNo = (tpl.fields || []).some(f => f?.auto === "controlNumber");
+  if (tpl.controlPrefix != null && String(tpl.controlPrefix).trim() !== "") {
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,39}$/.test(String(tpl.controlPrefix).trim())) {
+      errors.push("controlPrefix must be 1-40 characters (letters, digits, spaces, . _ - /)");
+    }
+  }
+  if (wantsAutoControlNo && !String(tpl.controlPrefix || "").trim()) {
+    errors.push('a field marked auto:"controlNumber" requires controlPrefix (e.g. "eLGU-R2")');
   }
   return [...new Set(errors)];
 }
@@ -1027,15 +1181,12 @@ const server = http.createServer(async (req, res) => {
       return row;
     };
     const reportId = url.pathname.split("/")[3]; // /api/reports/:id
+    const photoSub = url.pathname.split("/")[4] === "photos"; // /api/reports/:id/photos
     let body = {};
     if (req.method === "POST" || req.method === "PUT") {
-      let raw = "";
-      for await (const chunk of req) raw += chunk;
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        return sendJson(400, { error: { message: "Invalid JSON body" } });
-      }
+      // Bounded reader (P0) — this route used to buffer without any limit.
+      body = await readBodyJson(req);
+      if (body === null) return sendJson(400, { error: { message: "Invalid JSON body" } });
     }
 
     // Normalizes + validates a final report payload before it is persisted
@@ -1072,7 +1223,7 @@ const server = http.createServer(async (req, res) => {
         // their own. Includes the flattened report JSON for monitoring.
         if (url.searchParams.get("format") === "csv") {
           const [rows] = await pool.query(
-            `SELECT r.id, u.username AS owner_name, r.template_id, r.title, r.status,
+            `SELECT r.id, u.username AS owner_name, r.template_id, r.title, r.control_no, r.status,
                     r.report, r.created_at, r.updated_at
              FROM reports r LEFT JOIN users u ON u.id = r.owner
              ${all ? "" : "WHERE r.owner = ?"}
@@ -1087,7 +1238,9 @@ const server = http.createServer(async (req, res) => {
           return res.end(reportsToCsv(rows));
         }
         const [rows] = await pool.query(
-          `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.status, r.created_at, r.updated_at
+          `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.control_no, r.status,
+                  (SELECT COUNT(*) FROM report_photos p WHERE p.report_id = r.id) AS photos_count,
+                  r.created_at, r.updated_at
            FROM reports r LEFT JOIN users u ON u.id = r.owner
            ${all ? "" : "WHERE r.owner = ?"}
            ORDER BY r.updated_at DESC`,
@@ -1104,33 +1257,84 @@ const server = http.createServer(async (req, res) => {
         const id = crypto.randomUUID();
         const checked = sanitizeReportPayload(body.report, body.templateId);
         if (checked.error) return sendJson(422, checked.error);
+
+        // Plan 3.2: a template that opts in gets a server-issued control number,
+        // reserved atomically so two encoders can never collide on one. It is
+        // stored on the row (UNIQUE) and injected into the report data so the
+        // preview and the PDF show it without any extra plumbing.
+        let controlNo = null;
+        const tplCfg = readTemplateConfig(body.templateId);
+        const cnField = controlNumberField(tplCfg);
+        if (cnField) {
+          const seq = await reserveControlSeq(pool, String(body.templateId), new Date().getFullYear());
+          controlNo = formatControlNo(tplCfg.controlPrefix, seq);
+          if (checked.report) checked.report[cnField.id] = controlNo;
+        }
+
         await pool.query(
-          "INSERT INTO reports (id, owner, template_id, title, status, conversation, report, photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          `INSERT INTO reports (id, owner, template_id, title, control_no, status, conversation, report)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             id,
             user.id,
             String(body.templateId),
             body.title != null ? String(body.title) : null,
+            controlNo,
             body.status === "final" ? "final" : "draft",
             body.conversation != null ? JSON.stringify(body.conversation) : null,
-            checked.report != null ? JSON.stringify(checked.report) : null,
-            body.photos != null ? JSON.stringify(body.photos) : null
+            checked.report != null ? JSON.stringify(checked.report) : null
           ]
         );
-        writeAudit(user, "report.create", { detail: `${id} — ${body.title || "untitled"} (${body.templateId})` });
-        return sendJson(201, { id });
+        // Photos go to their own table (2.6). Accepted here so a client that
+        // still sends them on create keeps working.
+        if (Array.isArray(body.photos) && body.photos.length) {
+          const saved = await replaceReportPhotos(pool, id, body.photos);
+          if (saved.error) {
+            console.warn("[reports] create: photos rejected —", saved.error.message);
+          }
+        }
+        writeAudit(user, "report.create", {
+          detail: `${id} — ${body.title || "untitled"} (${body.templateId})${controlNo ? ` [${controlNo}]` : ""}`
+        });
+        return sendJson(201, { id, controlNo });
       }
 
       if (reportId) {
       // Non-admins may only touch their own reports.
       const canTouch = (row) => user.role === "admin" || row.owner === user.id;
 
-      // Fetch one report (full row).
+      // Photos (plan 2.6): fetched separately from the report row so a draft's
+      // megabytes of base64 no longer ride along with every read.
+      if (photoSub && reportId) {
+        const [rows] = await pool.query("SELECT owner, photos FROM reports WHERE id = ?", [reportId]);
+        if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+        if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+
+        if (req.method === "GET") {
+          return sendJson(200, { photos: await loadReportPhotos(pool, reportId) });
+        }
+        if (req.method === "PUT") {
+          const saved = await replaceReportPhotos(pool, reportId, body.photos);
+          if (saved.error) return sendJson(422, saved.error);
+          writeAudit(user, "report.photos", { detail: `${reportId} — ${saved.count} photo(s)` });
+          return sendJson(200, { ok: true, count: saved.count });
+        }
+        return sendJson(405, { error: { message: "Method not allowed" } });
+      }
+
+      // Fetch one report. Photos are deliberately NOT included — call
+      // /api/reports/:id/photos for those.
       if (req.method === "GET" && reportId) {
         const [rows] = await pool.query("SELECT * FROM reports WHERE id = ?", [reportId]);
         if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
         if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
-        return sendJson(200, normalizeReportRow(rows[0]));
+        const row = normalizeReportRow(rows[0]);
+        const [[pc]] = await pool.query(
+          "SELECT COUNT(*) AS n FROM report_photos WHERE report_id = ?", [reportId]
+        );
+        row.photos_count = pc.n || (Array.isArray(row.photos) ? row.photos.length : 0);
+        delete row.photos;
+        return sendJson(200, row);
       }
       // Update mutable fields.
       if (req.method === "PUT" && reportId) {
@@ -1149,21 +1353,31 @@ const server = http.createServer(async (req, res) => {
           sets.push("report = ?");
           params.push(checked.report != null ? JSON.stringify(checked.report) : null);
         }
-        if ("photos" in body) { sets.push("photos = ?"); params.push(body.photos != null ? JSON.stringify(body.photos) : null); }
-          if (!sets.length) return sendJson(400, { error: { message: "Nothing to update" } });
+        // Photos are no longer a column on this row (2.6) — they go to their
+        // own table below, which also keeps them out of the autosave payload.
+        if (!sets.length && !("photos" in body)) {
+          return sendJson(400, { error: { message: "Nothing to update" } });
+        }
+        if (sets.length) {
           params.push(reportId);
-          const [result] = await pool.query(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, params);
-          writeAudit(user, "report.update", { detail: reportId });
-          return sendJson(200, { ok: true });
+          await pool.query(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, params);
         }
-        if (req.method === "DELETE" && reportId) {
-          const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
-          if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
-          if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
-          await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
-          writeAudit(user, "report.delete", { detail: reportId });
-          return sendJson(200, { ok: true });
+        if ("photos" in body && Array.isArray(body.photos)) {
+          const saved = await replaceReportPhotos(pool, reportId, body.photos);
+          if (saved.error) return sendJson(422, saved.error);
         }
+        writeAudit(user, "report.update", { detail: reportId });
+        return sendJson(200, { ok: true });
+      }
+      // Delete a report. report_photos rows go with it via ON DELETE CASCADE.
+      if (req.method === "DELETE" && reportId) {
+        const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
+        if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+        if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+        await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
+        writeAudit(user, "report.delete", { detail: reportId });
+        return sendJson(200, { ok: true });
+      }
       }
 
       return sendJson(405, { error: { message: "Method not allowed" } });

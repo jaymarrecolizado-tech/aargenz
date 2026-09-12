@@ -48,14 +48,22 @@ export default function MyReports({ user, onOpen }) {
 
   const duplicate = async (r) => {
     try {
-      const full = await api.getReport(r.id);
+      // Photos are no longer part of the report payload (plan 2.6), so fetch
+      // them alongside it or the copy would silently lose its documentation.
+      const [full, photoRes] = await Promise.all([
+        api.getReport(r.id),
+        api.getPhotos(r.id).catch(() => ({ photos: [] }))
+      ]);
+      const photos = (photoRes?.photos || [])
+        .map(p => (typeof p === "string" ? p : p.dataUrl))
+        .filter(Boolean);
       await api.createReport({
         templateId: full.template_id,
         title: full.title ? full.title + " (copy)" : "Copy of report",
         status: "draft",
         conversation: full.conversation,
         report: full.report,
-        photos: full.photos
+        photos
       });
       load();
     } catch (e) {
@@ -108,7 +116,11 @@ export default function MyReports({ user, onOpen }) {
                 )}
               </div>
               <div style={{fontSize:"11px", color:"var(--muted)"}}>
+                {r.control_no && (
+                  <span style={{color:"var(--accent)", fontWeight:"600"}}>{r.control_no} · </span>
+                )}
                 {r.template_id} · {new Date(r.updated_at).toLocaleString()} · {r.status}
+                {r.photos_count ? ` · ${r.photos_count} photo${r.photos_count === 1 ? "" : "s"}` : ""}
               </div>
             </div>
             <button onClick={() => open(r)} className="mini-btn primary">Open</button>
