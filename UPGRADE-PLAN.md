@@ -49,7 +49,7 @@ that a government report process normally requires.
 | 2.9 | Static handler exposed the whole project root | **Critical** | S | ✅ **done** |
 | 3.1 | Approval / review workflow | High | L | ✅ **done** |
 | 3.2 | Auto-generated control numbers | High | M | **P1** |
-| 3.3 | Admin dashboard / analytics | High | M | **P1** |
+| 3.3 | Admin dashboard / analytics | High | M | ✅ **done** |
 | 3.4 | Duplicate-report ("clone last activity") | Med | S | **P1** |
 | 3.5 | Reports list: pagination, search, date filter | Med | M | **P1** |
 | 3.6 | Daily/weekly email digest | Low | M | **P2** |

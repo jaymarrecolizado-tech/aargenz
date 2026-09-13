@@ -94,6 +94,10 @@ export const api = {
   deleteTemplateLogo: (templateId, kind) =>
     req(`api/templates/${templateId}/logo?kind=${kind}`, { method: "DELETE" }),
 
+  // Admin analytics dashboard (plan 3.3): reports/month/template/encoder,
+  // the lifecycle funnel, and beneficiary + facilitator totals. Admin-only.
+  analytics: () => req("api/analytics"),
+
   // Audit trail (Phase 5.3): record a client-side event (fire-and-forget —
   // an export must never fail because logging did) and read the log (admin).
   auditEvent: (action, detail) => {

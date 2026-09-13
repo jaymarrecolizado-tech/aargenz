@@ -32,6 +32,7 @@ import { handleTemplates } from "./server/routes/templates.js";
 import { handleUsers } from "./server/routes/users.js";
 import { handleAuth } from "./server/routes/auth.js";
 import { handleReports } from "./server/routes/reports.js";
+import { handleAnalytics } from "./server/routes/analytics.js";
 import { handleAiStatus } from "./server/routes/ai.js";
 import { handleChat } from "./server/routes/chat.js";
 import { handleStatic } from "./server/routes/static.js";
@@ -46,6 +47,7 @@ const API_ROUTES = [
   handleUsers,
   handleAuth,
   handleReports,
+  handleAnalytics,
   handleAiStatus,
   handleChat
 ];

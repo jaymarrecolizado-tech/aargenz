@@ -24,6 +24,8 @@ export default function AdminPanel({ templates, onPersonnelSaved, user }) {
           ? <PersonnelEditor templates={templates} onSaved={onPersonnelSaved}/>
           : section === "users"
           ? <UserManagement currentUser={user}/>
+          : section === "dashboard"
+          ? <Analytics templates={templates}/>
           : section === "review"
           ? <ReviewQueue/>
           : section === "ai"

@@ -223,6 +223,15 @@ try {
   const chatBad = await call("POST", "/api/chat", { rawBody: "not json" });
   check("POST /api/chat invalid JSON -> 400", chatBad.status === 400, `status=${chatBad.status}`);
 
+  // ------------------------------------------------------- G2. analytics
+  const ana = await call("GET", "/api/analytics");
+  check("GET /api/analytics admin -> 200", ana.status === 200 && ana.json?.totals && Array.isArray(ana.json?.byMonth), `status=${ana.status}`);
+  check("analytics: funnel has 4 states", ana.json && ["draft", "submitted", "approved", "rejected"].every((k) => k in (ana.json.statusFunnel || {})));
+  check("analytics: beneficiary totals are numbers",
+    ana.json && typeof ana.json.beneficiaries?.male === "number" && typeof ana.json.beneficiaries?.female === "number");
+  check("analytics: facilitator leaderboard is an array",
+    ana.json && Array.isArray(ana.json.facilitators?.leaderboard));
+
   // ------------------------------------------------------------ H. static
   check("GET / -> 200", (await call("GET", "/")).status === 200);
   const spa = await call("GET", "/some/spa/route");
