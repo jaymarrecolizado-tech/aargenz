@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
+import { useReadOnly } from "../lib/readonly.js";
 
 // eGov PH Post-Event Report preview (layout: "egov"). Mirrors the official
 // Word/PDF form: info table → I. Overview → II. Challenges & Recommendation
@@ -11,13 +12,16 @@ import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/coll
 const BLUE = "#0000cc";
 
 // Click-to-edit text, self-contained (same interaction as ReportPreview).
+// A submitted or approved report is locked (plan 3.1), so in read-only mode the
+// field renders as plain text instead of offering an editor that cannot save.
 function Editable({ path, value, onUpdate, style, placeholder, multiline = false }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const start = () => { setDraft(value || ""); setEditing(true); };
-  const save = () => { onUpdate(path, draft); setEditing(false); };
+  const start = () => { if (readOnly) return; setDraft(value || ""); setEditing(true); };
+  const save = () => { if (!readOnly) onUpdate(path, draft); setEditing(false); };
 
-  if (editing) {
+  if (editing && !readOnly) {
     const shared = {
       autoFocus: true,
       value: draft,
@@ -32,8 +36,12 @@ function Editable({ path, value, onUpdate, style, placeholder, multiline = false
   return (
     <span
       onClick={start}
-      title="Click to edit"
-      style={{ cursor: "pointer", background: "#f8f8f8", padding: "2px 4px", borderRadius: "3px", ...style }}
+      title={readOnly ? undefined : "Click to edit"}
+      style={{
+        cursor: readOnly ? "default" : "pointer",
+        background: readOnly ? "transparent" : "#f8f8f8",
+        padding: "2px 4px", borderRadius: "3px", ...style
+      }}
     >
       {value || <em style={{ color: "#999" }}>{placeholder || "Click to add"}</em>}
     </span>
@@ -83,6 +91,7 @@ const thStyle = { background: BLUE, color: "#fff", fontWeight: "bold", padding: 
 const tdStyle = { padding: "6px 10px", border: `1px solid ${BLUE}` };
 
 export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, headerImg, footerImg, template, photoLayout = "classic", onLayoutChange }) {
+  const readOnly = useReadOnly();
   const field = (id) => (template?.fields || []).find(f => f.id === id);
   const materialsField = field("materials");
   const captions = data.photoCaptions || [];
@@ -141,10 +150,14 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
                   <span>{i + 1}.</span>
                   <Editable path={`representatives.${i}.name`} value={r.name} onUpdate={(p, v) => setListItem("representatives", i, "name", v)} placeholder="Name"/>
-                  <button onClick={() => removeListItem("representatives", i)} title="Remove" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+                  {!readOnly && (
+                    <button onClick={() => removeListItem("representatives", i)} title="Remove" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+                  )}
                 </div>
               ))}
-              <button onClick={() => addListItem("representatives", { name: "" })} style={{ padding: "3px 10px", borderRadius: "12px", border: `1px solid ${BLUE}`, background: "#fff", color: BLUE, fontSize: "11px", fontWeight: "600", cursor: "pointer", marginTop: "4px" }}>+ Add</button>
+              {!readOnly && (
+                <button onClick={() => addListItem("representatives", { name: "" })} style={{ padding: "3px 10px", borderRadius: "12px", border: `1px solid ${BLUE}`, background: "#fff", color: BLUE, fontSize: "11px", fontWeight: "600", cursor: "pointer", marginTop: "4px" }}>+ Add</button>
+              )}
             </td>
             <td style={thStyle}>Total No. of Registrants</td>
             <td style={tdStyle}><Editable path="totalRegistrants" value={data.totalRegistrants} onUpdate={onUpdate} placeholder="e.g. 254"/></td>
@@ -152,14 +165,16 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
           <tr>
             <td style={thStyle}>Submitted Video and Photo Documentations?</td>
             <td style={tdStyle} colSpan="3">
-              <select
-                value={data.docsSubmitted || ""}
-                onChange={e => onUpdate("docsSubmitted", e.target.value)}
-                style={{ padding: "4px 8px", borderRadius: "6px", border: "1px solid #ccd5f0", fontSize: "13px", background: "#fff" }}
-              >
-                <option value="">—</option>
-                {((field("docsSubmitted")?.options) || ["Yes", "No"]).map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
+              {readOnly ? (data.docsSubmitted || "—") : (
+                <select
+                  value={data.docsSubmitted || ""}
+                  onChange={e => onUpdate("docsSubmitted", e.target.value)}
+                  style={{ padding: "4px 8px", borderRadius: "6px", border: "1px solid #ccd5f0", fontSize: "13px", background: "#fff" }}
+                >
+                  <option value="">—</option>
+                  {((field("docsSubmitted")?.options) || ["Yes", "No"]).map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              )}
             </td>
           </tr>
         </tbody>
@@ -199,7 +214,9 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
                   <Editable path={`challenges.${i}.recommendation`} value={c.recommendation} onUpdate={(p, v) => setListItem("challenges", i, "recommendation", v)} multiline placeholder="Proposed recommendation"/>
                 </td>
                 <td style={{ padding: "2px 4px", border: "1px solid #ccc", textAlign: "center" }}>
-                  <button onClick={() => removeListItem("challenges", i)} title="Remove pair" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+                  {!readOnly && (
+                    <button onClick={() => removeListItem("challenges", i)} title="Remove pair" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -208,14 +225,16 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
             )}
           </tbody>
         </table>
-        <button onClick={() => addListItem("challenges", { issue: "", recommendation: "" })} style={{ padding: "4px 12px", borderRadius: "14px", border: `1px solid ${BLUE}`, background: "#fff", color: BLUE, fontSize: "11px", fontWeight: "600", cursor: "pointer" }}>+ Add challenge / recommendation</button>
+        {!readOnly && (
+          <button onClick={() => addListItem("challenges", { issue: "", recommendation: "" })} style={{ padding: "4px 12px", borderRadius: "14px", border: `1px solid ${BLUE}`, background: "#fff", color: BLUE, fontSize: "11px", fontWeight: "600", cursor: "pointer" }}>+ Add challenge / recommendation</button>
+        )}
       </div>
 
       {/* III. PHOTO DOCUMENTATION */}
       <div style={{ marginBottom: "20px" }}>
         <div style={{ fontWeight: "bold", marginBottom: "8px", display: "flex", alignItems: "center", gap: "12px" }}>
           <span>III.&nbsp;&nbsp;PHOTO DOCUMENTATION</span>
-          {photos.length > 0 && onLayoutChange && (
+          {photos.length > 0 && onLayoutChange && !readOnly && (
             <select value={photoLayout} onChange={e => onLayoutChange(e.target.value)} style={{ fontSize: "12px", padding: "3px 8px", borderRadius: "6px", border: "1px solid #ccd5f0", fontWeight: "normal" }} title="Photo collage layout">
               {COLLAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
             </select>
@@ -229,7 +248,7 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
                 <div key={i} style={{ ...slot, position: "relative", display: "flex", flexDirection: "column" }}>
                   <div style={{ flex: 1, overflow: "hidden", background: "#f5f5f5", position: "relative" }}>
                     <img src={p} alt={`Photo ${i + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
-                    {onRemovePhoto && (
+                    {onRemovePhoto && !readOnly && (
                       <button onClick={() => onRemovePhoto(i)} title="Remove photo" style={{ position: "absolute", top: "4px", right: "4px", width: "22px", height: "22px", borderRadius: "50%", border: "none", background: "rgba(204,0,0,0.85)", color: "#fff", cursor: "pointer", fontWeight: "bold", lineHeight: 1 }}>✕</button>
                     )}
                   </div>
@@ -280,14 +299,16 @@ export default function EgovPreview({ data, photos, onUpdate, onRemovePhoto, hea
                     const val = data.materials?.[r.id]?.[s.id] || "";
                     return (
                       <td key={`${r.id}-${s.id}`} colSpan={(materialsField.options || []).length} style={{ padding: "4px 6px", border: "1px solid #ccc", textAlign: "center" }}>
-                        <select
-                          value={val}
-                          onChange={e => onUpdate(`materials.${r.id}.${s.id}`, e.target.value)}
-                          style={{ width: "100%", border: "1px solid #ccd5f0", borderRadius: "4px", fontSize: "12px", padding: "3px 2px", background: "#fff" }}
-                        >
-                          <option value="">—</option>
-                          {(materialsField.options || []).map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
-                        </select>
+                        {readOnly ? (materialsField.options || []).find(o => o.id === val)?.label || "—" : (
+                          <select
+                            value={val}
+                            onChange={e => onUpdate(`materials.${r.id}.${s.id}`, e.target.value)}
+                            style={{ width: "100%", border: "1px solid #ccd5f0", borderRadius: "4px", fontSize: "12px", padding: "3px 2px", background: "#fff" }}
+                          >
+                            <option value="">—</option>
+                            {(materialsField.options || []).map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                          </select>
+                        )}
                       </td>
                     );
                   })}

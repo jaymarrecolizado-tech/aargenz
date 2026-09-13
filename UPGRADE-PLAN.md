@@ -47,7 +47,7 @@ that a government report process normally requires.
 | 2.7 | Optimistic concurrency on autosave | Med | M | **P1** |
 | 2.8 | Autosave retry queue + unload guard | Med | S | **P1** |
 | 2.9 | Static handler exposed the whole project root | **Critical** | S | ✅ **done** |
-| 3.1 | Approval / review workflow | High | L | **P1** |
+| 3.1 | Approval / review workflow | High | L | ✅ **done** |
 | 3.2 | Auto-generated control numbers | High | M | **P1** |
 | 3.3 | Admin dashboard / analytics | High | M | **P1** |
 | 3.4 | Duplicate-report ("clone last activity") | Med | S | **P1** |
@@ -479,6 +479,7 @@ merely *correct*.
 | 3.4 Duplicate report | ✅ implemented |
 | 2.9 Static handler exposed the whole project root | ✅ fixed (root allowlist) |
 | 5.1 Split `server.js` into route modules | ✅ implemented (21 modules) |
+| 3.1 Approval / review workflow | ✅ implemented (server + client) |
 | 3.1, 3.3, 3.5, 3.6, 4.x, 5.2–5.6 | ⏳ open |
 
 **All P0 items are now done.** 2.7 and 3.4 landed in the commit that follows

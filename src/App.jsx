@@ -15,6 +15,7 @@ import { compressImage } from "./lib/images.js";
 import { MAX_PHOTOS, loadSavedLayout, saveLayout } from "./lib/collage.js";
 import { loadGallery, addToGallery, HEADER_GALLERY_KEY, FOOTER_GALLERY_KEY } from "./lib/presets.js";
 import { api } from "./lib/api.js";
+import { isLockedFor, canTransition } from "./lib/lifecycle.js";
 import {
   fetchTemplates, getTemplate, getBuiltinTemplate,
   buildSystemPrompt, loadSavedTemplateId, saveTemplateId
@@ -66,6 +67,28 @@ const stripFences = (t) => String(t || "").replace(/```(?:json)?[\s\S]*?```/gi, 
 // template doesn't use automatic numbering (plan 3.2).
 const controlNoFieldId = (tpl) =>
   (tpl?.fields || []).find(f => f && f.auto === "controlNumber")?.id || null;
+
+// Lifecycle status badge (plan 3.1). Colour-coded so the report's state reads
+// at a glance in My Reports and the in-app lifecycle bar.
+const STATUS_LABELS = { draft: "Draft", submitted: "Submitted", approved: "Approved", rejected: "Rejected" };
+const STATUS_COLORS = {
+  draft:     { bg: "#eef1f6", fg: "#475467" },
+  submitted: { bg: "#fef3e2", fg: "#994d00" },
+  approved:  { bg: "#e6f4ea", fg: "#137333" },
+  rejected:  { bg: "#fdecea", fg: "#b71c1c" }
+};
+function StatusBadge({ status }) {
+  const c = STATUS_COLORS[status] || STATUS_COLORS.draft;
+  return (
+    <span style={{
+      display: "inline-block", padding: "2px 10px", borderRadius: "10px",
+      fontSize: "11px", fontWeight: "700", background: c.bg, color: c.fg,
+      textTransform: "uppercase", letterSpacing: "0.4px"
+    }}>
+      {STATUS_LABELS[status] || status || "Draft"}
+    </span>
+  );
+}
 
 // Idempotency key for report creation (plan 2.7). The client picks the id so a
 // retry after a lost response returns the row that already exists instead of
@@ -160,6 +183,28 @@ export default function App() {
   // a version in state would make every successful save retrigger the effect —
   // bumping the version again, forever.
   const reportVersionRef = useRef(null);
+  // Lifecycle state of the *loaded* report (plan 3.1). A fresh draft has no
+  // server id yet, so it is implicitly "draft" and fully editable; once a report
+  // is opened we track its status, owner and review metadata so the UI can show
+  // the right lifecycle actions and lock the preview when it is frozen.
+  const [reportStatus, setReportStatus] = useState("draft");
+  const [reportOwnerId, setReportOwnerId] = useState(null);
+  const [reportReview, setReportReview] = useState(null);
+  const [lifecycleMsg, setLifecycleMsg] = useState("");
+  // True when the loaded report is frozen for the current user — the preview
+  // goes read-only and autosave is suppressed. Derived from the same rule the
+  // server enforces (server/lib/review.js), so they cannot disagree.
+  const reportLocked = !!reportId && isLockedFor(reportStatus, user, reportOwnerId === user.id);
+  // Which lifecycle buttons this user may press right now. Mirrors the server's
+  // canTransition so the UI never offers an action the API would reject.
+  const isOwnerLocal = reportOwnerId === user.id;
+  const canDo = (action) => canTransition(reportStatus, action, { role: user.role, isOwner: isOwnerLocal }).ok;
+  const lifecycleMsgTimer = useRef(null);
+  const flashLifecycle = (msg) => {
+    setLifecycleMsg(msg);
+    clearTimeout(lifecycleMsgTimer.current);
+    lifecycleMsgTimer.current = setTimeout(() => setLifecycleMsg(""), 4000);
+  };
   // Clears the per-draft identity. Call alongside setReportId(null) whenever a
   // new draft begins, or the next report would inherit the previous id and the
   // server would hand back the old row instead of creating one.
@@ -167,6 +212,32 @@ export default function App() {
     draftIdRef.current = null;
     reportVersionRef.current = null;
     setConflict(null);
+  };
+  // Clears the loaded-report lifecycle state. Called on logout / new template /
+  // new report so the next draft starts as a fully-editable "draft".
+  const resetReportLifecycle = () => {
+    setReportStatus("draft");
+    setReportOwnerId(null);
+    setReportReview(null);
+    setLifecycleMsg("");
+  };
+  // Pulls the status / owner / review metadata out of a full report row. Shared
+  // by "open" and "reload theirs" so both keep the same local view of the row.
+  const adoptReportLifecycle = (full) => {
+    setReportStatus(full.status || "draft");
+    setReportOwnerId(full.owner ?? null);
+    setReportReview(
+      full.status && full.status !== "draft"
+        ? {
+            status: full.status,
+            submittedBy: full.submitted_by_name || null,
+            submittedAt: full.submitted_at || null,
+            reviewedBy: full.reviewed_by_name || null,
+            reviewedAt: full.reviewed_at || null,
+            remarks: full.remarks || null
+          }
+        : null
+    );
   };
   const markManualEdit = (path) => { manualEditsRef.current.add(String(path).split(".")[0]); };
   const resetManualEdits = () => { manualEditsRef.current = new Set(); };
@@ -269,10 +340,16 @@ export default function App() {
           applySaved(await api.updateReport(pending.reportId, pending.payload));
         } else {
           const created = await api.createReport(pending.payload);
-          if (created?.id) {
-            setReportId(created.id);
-            applySaved(created);
-          }
+        if (created?.id) {
+          setReportId(created.id);
+          applySaved(created);
+          // The report now exists on the server as a draft owned by this user,
+          // so record that locally — otherwise the lock check would treat the
+          // owner as a non-owner and freeze the very draft they are editing.
+          setReportOwnerId(user.id);
+          setReportStatus("draft");
+          setReportReview(null);
+        }
         }
         pendingSaveRef.current = null;
       }
@@ -325,14 +402,20 @@ export default function App() {
   // photo set no longer rides along with every save.
   useEffect(() => {
     if (!user) return;
+    // A locked report (submitted/approved for this user — plan 3.1) cannot be
+    // written, so there is nothing to autosave. The lifecycle action is the only
+    // way the status moves; the preview is read-only in this state.
+    if (reportLocked) return;
     const hasContent = messages.length > 1 || !!reportData;
     if (!hasContent) return;
     const t = setTimeout(async () => {
       setSyncState("saving");
+      // `status` is intentionally NOT sent here. It is the lifecycle field and
+      // only the transition endpoint may move it; sending a status on every
+      // autosave would let any client self-approve a report.
       const payload = {
         templateId: template.id,
         title: draftTitle(),
-        status: reportData ? "final" : "draft",
         conversation: messages,
         report: reportData
       };
@@ -354,6 +437,11 @@ export default function App() {
           if (created?.id) {
             setReportId(created.id);
             applySaved(created);
+            // Record local ownership so the lock check knows this user owns the
+            // draft they are editing (same fix as the autosave effect above).
+            setReportOwnerId(user.id);
+            setReportStatus("draft");
+            setReportReview(null);
             // The control number is issued by the server (plan 3.2) so two
             // encoders can never collide on one. Surface it in the preview
             // straight away instead of waiting for a reload.
@@ -421,6 +509,9 @@ export default function App() {
     reportVersionRef.current = full.version ?? null;
     draftIdRef.current = null;
     setConflict(null);
+    // Track the loaded report's lifecycle so the preview can lock and the right
+    // actions (Submit / Withdraw / Approve / Reject / Reopen) can be shown.
+    adoptReportLifecycle(full);
     setTab(full.report ? "preview" : "chat");
     // Photos come from their own endpoint (plan 2.6) so opening a report no
     // longer drags megabytes through the report payload. Clearing the dirty
@@ -432,6 +523,32 @@ export default function App() {
         (res?.photos || []).map(p => (typeof p === "string" ? p : p.dataUrl)).filter(Boolean)
       ))
       .catch(() => { /* report still opens without its photos */ });
+  };
+
+  // ---- Lifecycle transitions (plan 3.1) -----------------------------------
+  // Submit / Withdraw / Approve / Reject / Reopen all go through the one
+  // transition endpoint, which enforces the state machine server-side. After a
+  // successful move we re-fetch the row so the local status, version, lock and
+  // review metadata stay in sync with the database.
+  const doTransition = async (action, remarks) => {
+    if (!reportId) return;
+    try {
+      await api.transitionReport(reportId, action, remarks);
+      const full = await api.getReport(reportId);
+      reportVersionRef.current = full.version ?? null;
+      adoptReportLifecycle(full);
+      flashLifecycle(`Report ${action}ed.`);
+    } catch (e) {
+      flashLifecycle(e?.message || `Could not ${action} the report`);
+    }
+  };
+
+  // Rejection must carry a reason (server-enforced); prompt for it first.
+  const rejectWithRemarks = () => {
+    const r = window.prompt("Reason for rejection (required):");
+    if (r == null) return; // cancelled
+    if (!r.trim()) { window.alert("A reason is required to reject a report."); return; }
+    doTransition("reject", r.trim());
   };
 
   // ---- Conflict resolution (plan 2.7) --------------------------------------
@@ -458,6 +575,7 @@ export default function App() {
       resetManualEdits();
       setMessages(full.conversation?.length ? full.conversation : [initialMessage]);
       setReportData(full.report ? normalizeReport(full.report, template) : null);
+      adoptReportLifecycle(full);
       photosDirtyRef.current = false;
       api.getPhotos(full.id)
         .then(res => setPhotos(
@@ -481,6 +599,7 @@ export default function App() {
     photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
     resetDraftIdentity();
+    resetReportLifecycle();
     setTab("chat");
   };
 
@@ -499,6 +618,7 @@ export default function App() {
     photosDirtyRef.current = false; // don't push stale photos to the next report
     setReportId(null);
     resetDraftIdentity();
+    resetReportLifecycle();
     setSyncState("idle");
     setTab("chat");
   };
@@ -802,10 +922,10 @@ export default function App() {
               <button onClick={() => fileRef.current?.click()} className="hbtn">
                 Upload Photos
               </button>
-              <button onClick={() => { api.auditEvent("export.pdf"); printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout }); }} className="hbtn primary">
+              <button onClick={() => { api.auditEvent("export.pdf"); printReport({ data: reportData, photos, headerImgData, footerImgData, template, photoLayout, review: reportReview }); }} className="hbtn primary">
                 Export PDF
               </button>
-              <button onClick={() => { api.auditEvent("export.rtf"); exportRtf(reportData, photos, template); }} className="hbtn">
+              <button onClick={() => { api.auditEvent("export.rtf"); exportRtf(reportData, photos, template, reportReview); }} className="hbtn">
                 Export RTF
               </button>
               <button onClick={handleDownloadDataset} className="hbtn" title="Download this report as a fine-tuning example (sharegpt JSONL)">
@@ -895,6 +1015,33 @@ export default function App() {
       )}
 
       <div className="page-pad" style={{flex:1, overflow:"auto", padding:"24px", display:"flex", justifyContent:"center"}}>
+        {reportId && (
+          <div style={{position:"sticky", top:0, zIndex:5, width:"100%", maxWidth:"850px", margin:"0 auto 16px", display:"flex", alignItems:"center", gap:"12px", padding:"8px 14px", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"10px", flexWrap:"wrap"}}>
+            <span style={{fontSize:"12px", fontWeight:"600", color:"var(--muted)"}}>Status</span>
+            <StatusBadge status={reportStatus}/>
+            {reportReview?.submittedBy && (
+              <span style={{fontSize:"11px", color:"var(--muted)"}}>
+                by {reportReview.submittedBy}{reportReview.submittedAt ? ` · ${new Date(reportReview.submittedAt).toLocaleString()}` : ""}
+              </span>
+            )}
+            {reportReview?.reviewedBy && (
+              <span style={{fontSize:"11px", color:"var(--muted)"}}>
+                reviewed by {reportReview.reviewedBy}{reportReview.reviewedAt ? ` · ${new Date(reportReview.reviewedAt).toLocaleString()}` : ""}
+              </span>
+            )}
+            {reportReview?.remarks && (
+              <span style={{fontSize:"11px", color:"var(--muted)", fontStyle:"italic", maxWidth:"360px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={reportReview.remarks}>“{reportReview.remarks}”</span>
+            )}
+            <span style={{flex:"1 1 auto"}} />
+            {lifecycleMsg && <span style={{fontSize:"12px", fontWeight:"600", color: lifecycleMsg.toLowerCase().startsWith("report") ? "#137333" : "#b71c1c"}}>{lifecycleMsg}</span>}
+            {canDo("submit") && <button onClick={() => doTransition("submit")} className="mini-btn primary">Submit for review</button>}
+            {canDo("withdraw") && <button onClick={() => doTransition("withdraw")} className="mini-btn">Withdraw</button>}
+            {canDo("approve") && <button onClick={() => doTransition("approve")} className="mini-btn primary" style={{background:"#15803d", borderColor:"#15803d", color:"#fff"}}>Approve</button>}
+            {canDo("reject") && <button onClick={rejectWithRemarks} className="mini-btn danger">Reject</button>}
+            {canDo("reopen") && <button onClick={() => doTransition("reopen")} className="mini-btn">Reopen</button>}
+          </div>
+        )}
+
         {tab === "chat" ? (
           <div className="split-wrap" style={{display:"flex", gap:"16px", width:"100%", maxWidth:"1500px"}}>
             <div className="split-chat" style={{flex: splitView ? "1 1 480px" : "0 0 auto", minWidth:"320px", maxWidth: splitView ? undefined : "680px", width: splitView ? undefined : "100%"}}>
@@ -926,6 +1073,7 @@ export default function App() {
                       template={template}
                       photoLayout={photoLayout}
                       onLayoutChange={changePhotoLayout}
+                      readOnly={reportLocked}
                     />
                   </div>
                 ) : (
@@ -946,7 +1094,7 @@ export default function App() {
         ) : tab === "admin" ? (
           <AdminPanel templates={templates || [getBuiltinTemplate("aar-elgu")]} onPersonnelSaved={() => fetchTemplates().then(setTemplates)} user={user}/>
         ) : (
-          <div style={{width:"100%", maxWidth:"850px"}}>
+            <div style={{width:"100%", maxWidth:"850px"}}>
             {reportData ? (
               <div className="paper">
                 <ReportPreview
@@ -961,6 +1109,7 @@ export default function App() {
                   template={template}
                   photoLayout={photoLayout}
                   onLayoutChange={changePhotoLayout}
+                  readOnly={reportLocked}
                 />
               </div>
             ) : (

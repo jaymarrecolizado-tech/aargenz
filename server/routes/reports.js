@@ -12,6 +12,7 @@ import { reportsToCsv } from "../lib/csv.js";
 import { reserveControlSeq, formatControlNo, controlNumberField, readTemplateConfig } from "../lib/controlNumbers.js";
 import { UUID_RE, expectedVersion } from "../lib/concurrency.js";
 import { replaceReportPhotos, loadReportPhotos } from "../lib/photos.js";
+import { STATUSES, TRANSITIONS, canTransition, isLockedFor, buildStamp } from "../lib/review.js";
 
 export async function handleReports(ctx) {
   const { req, res, url, sendJson, getSessionUser, requireAdmin, readBodyJson, writeAudit, rootDir: __dirname } = ctx;
@@ -38,6 +39,7 @@ export async function handleReports(ctx) {
     };
     const reportId = url.pathname.split("/")[3]; // /api/reports/:id
     const photoSub = url.pathname.split("/")[4] === "photos"; // /api/reports/:id/photos
+    const transitionSub = url.pathname.split("/")[4] === "transition"; // /api/reports/:id/transition
     let body = {};
     if (req.method === "POST" || req.method === "PUT") {
       // Bounded reader (P0) — this route used to buffer without any limit.
@@ -71,9 +73,22 @@ export async function handleReports(ctx) {
 
     try {
       // List the logged-in user's reports (metadata only; conversation/report
-      // excluded). Admins can list everyone's with ?all=1.
+      // excluded). Admins can list everyone's with ?all=1, and anyone can narrow
+      // to one lifecycle state with ?status= — which is how the reviewer queue
+      // asks for "everything submitted".
       if (req.method === "GET" && !reportId) {
         const all = url.searchParams.get("all") === "1" && user.role === "admin";
+        const requested = url.searchParams.get("status");
+        const statusFilter = STATUSES.includes(requested) ? requested : null;
+        if (requested && !statusFilter) {
+          return sendJson(400, { error: { message: `Unknown status "${requested}"` } });
+        }
+        const where = [];
+        const params = [];
+        if (!all) { where.push("r.owner = ?"); params.push(user.id); }
+        if (statusFilter) { where.push("r.status = ?"); params.push(statusFilter); }
+        const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+
         // CSV download (Phase 6): ?format=csv exports the same view as a
         // spreadsheet — admins get everyone's rows with ?all=1, encoders
         // their own. Includes the flattened report JSON for monitoring.
@@ -82,11 +97,13 @@ export async function handleReports(ctx) {
             `SELECT r.id, u.username AS owner_name, r.template_id, r.title, r.control_no, r.status,
                     r.report, r.created_at, r.updated_at
              FROM reports r LEFT JOIN users u ON u.id = r.owner
-             ${all ? "" : "WHERE r.owner = ?"}
+             ${whereSql}
              ORDER BY r.updated_at DESC`,
-            all ? [] : [user.id]
+            params
           );
-          writeAudit(user, "report.export.csv", { detail: `${rows.length} row(s)${all ? " (all users)" : ""}` });
+          writeAudit(user, "report.export.csv", {
+            detail: `${rows.length} row(s)${all ? " (all users)" : ""}${statusFilter ? ` [${statusFilter}]` : ""}`
+          });
           res.writeHead(200, {
             "Content-Type": "text/csv; charset=utf-8",
             "Content-Disposition": `attachment; filename="aar-reports-${new Date().toISOString().slice(0, 10)}.csv"`
@@ -95,19 +112,70 @@ export async function handleReports(ctx) {
         }
         const [rows] = await pool.query(
           `SELECT r.id, r.owner, u.username AS owner_name, r.template_id, r.title, r.control_no, r.status,
-                  r.version,
+                  r.version, r.submitted_at, r.submitted_by_name, r.reviewed_at, r.reviewed_by_name, r.remarks,
                   (SELECT COUNT(*) FROM report_photos p WHERE p.report_id = r.id) AS photos_count,
                   r.created_at, r.updated_at
            FROM reports r LEFT JOIN users u ON u.id = r.owner
-           ${all ? "" : "WHERE r.owner = ?"}
+           ${whereSql}
            ORDER BY r.updated_at DESC`,
-          all ? [] : [user.id]
+          params
         );
         return sendJson(200, rows);
       }
 
+      // Lifecycle transitions (plan 3.1). Handled *before* the create branch,
+      // and the create branch below is guarded on !reportId: previously a POST
+      // to any /api/reports/<id>... path fell into "create a report" and failed
+      // with "templateId is required".
+      //
+      // One endpoint for every transition keeps the rules in server/lib/review.js
+      // rather than spread across five route names.
+      if (transitionSub && reportId) {
+        if (req.method !== "POST") return sendJson(405, { error: { message: "Method not allowed" } });
+        const action = String(body?.action || "");
+        const transition = TRANSITIONS[action];
+        if (!transition) return sendJson(400, { error: { message: `Unknown action "${action}"` } });
+
+        const [rows] = await pool.query(
+          "SELECT owner, status, title FROM reports WHERE id = ?", [reportId]
+        );
+        if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
+        const row = rows[0];
+        const isOwner = row.owner === user.id;
+        if (!isOwner && user.role !== "admin") {
+          return sendJson(403, { error: { message: "Not your report" } });
+        }
+
+        const allowed = canTransition(row.status, action, { role: user.role, isOwner });
+        if (!allowed.ok) return sendJson(409, { error: { message: allowed.message }, status: row.status });
+
+        const remarks = body?.remarks != null ? String(body.remarks).trim().slice(0, 4000) : null;
+        if (transition.requiresRemarks && !remarks) {
+          return sendJson(400, { error: { message: "A reason is required when rejecting a report." } });
+        }
+
+        // The expected status rides in the WHERE, so two reviewers cannot both
+        // approve the same submission — the loser's affectedRows is 0.
+        const stamp = buildStamp(action, user, remarks);
+        const [r] = await pool.query(
+          `UPDATE reports SET status = ?, ${stamp.sets.join(", ")} WHERE id = ? AND status = ?`,
+          [transition.to, ...stamp.params, reportId, row.status]
+        );
+        if (r.affectedRows === 0) {
+          return sendJson(409, {
+            error: { message: "This report changed while you were looking at it. Reload and try again." },
+            code: "status_conflict"
+          });
+        }
+        writeAudit(user, `report.${action}`, {
+          detail: `${reportId} — ${row.title || "untitled"} (${row.status} → ${transition.to})`
+            + (remarks ? `: ${remarks.slice(0, 120)}` : "")
+        });
+        return sendJson(200, { ok: true, status: transition.to });
+      }
+
       // Create a new report.
-      if (req.method === "POST") {
+      if (req.method === "POST" && !reportId) {
         if (!body.templateId) {
           return sendJson(400, { error: { message: "templateId is required" } });
         }
@@ -158,7 +226,10 @@ export async function handleReports(ctx) {
               String(body.templateId),
               body.title != null ? String(body.title) : null,
               controlNo,
-              body.status === "final" ? "final" : "draft",
+              // A new report always starts its life as a draft (plan 3.1). The
+              // client used to send status here, which meant every autosave
+              // re-marked the row; the lifecycle now moves it explicitly.
+              "draft",
               body.conversation != null ? JSON.stringify(body.conversation) : null,
               checked.report != null ? JSON.stringify(checked.report) : null
             ]
@@ -198,10 +269,23 @@ export async function handleReports(ctx) {
       // Non-admins may only touch their own reports.
       const canTouch = (row) => user.role === "admin" || row.owner === user.id;
 
+      // The edit lock (plan 3.1). Enforced here rather than only in the UI, so
+      // an approved record really is immutable and a submitted one cannot be
+      // changed out from under its reviewer.
+      const lockedResponse = (status) => sendJson(409, {
+        error: {
+          message: status === "approved"
+            ? "This report has been approved and can no longer be edited. Ask a reviewer to reopen it."
+            : "This report is with a reviewer, so it is locked while they read it. Withdraw it to make changes."
+        },
+        code: "report_locked",
+        status
+      });
+
       // Photos (plan 2.6): fetched separately from the report row so a draft's
       // megabytes of base64 no longer ride along with every read.
       if (photoSub && reportId) {
-        const [rows] = await pool.query("SELECT owner, photos FROM reports WHERE id = ?", [reportId]);
+        const [rows] = await pool.query("SELECT owner, photos, status FROM reports WHERE id = ?", [reportId]);
         if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
         if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
 
@@ -209,6 +293,9 @@ export async function handleReports(ctx) {
           return sendJson(200, { photos: await loadReportPhotos(pool, reportId) });
         }
         if (req.method === "PUT") {
+          if (isLockedFor(rows[0].status, user, rows[0].owner === user.id)) {
+            return lockedResponse(rows[0].status);
+          }
           const saved = await replaceReportPhotos(pool, reportId, body.photos);
           if (saved.error) return sendJson(422, saved.error);
           writeAudit(user, "report.photos", { detail: `${reportId} — ${saved.count} photo(s)` });
@@ -233,13 +320,18 @@ export async function handleReports(ctx) {
       }
       // Update mutable fields.
       if (req.method === "PUT" && reportId) {
-        const [rows] = await pool.query("SELECT owner, version FROM reports WHERE id = ?", [reportId]);
+        const [rows] = await pool.query("SELECT owner, version, status FROM reports WHERE id = ?", [reportId]);
         if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
         if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+        if (isLockedFor(rows[0].status, user, rows[0].owner === user.id)) {
+          return lockedResponse(rows[0].status);
+        }
         const sets = [];
         const params = [];
         if ("title" in body) { sets.push("title = ?"); params.push(body.title != null ? String(body.title) : null); }
-        if ("status" in body) { sets.push("status = ?"); params.push(body.status === "final" ? "final" : "draft"); }
+        // `status` is deliberately NOT writable here any more. It is the
+        // lifecycle field (plan 3.1) and only POST /:id/transition may move it —
+        // otherwise any client could PUT status:"approved" and self-approve.
         if ("conversation" in body) { sets.push("conversation = ?"); params.push(body.conversation != null ? JSON.stringify(body.conversation) : null); }
         if ("report" in body) {
           const tplId = body.templateId || (await pool.query("SELECT template_id FROM reports WHERE id = ?", [reportId]))[0][0]?.template_id;
@@ -288,11 +380,20 @@ export async function handleReports(ctx) {
       }
       // Delete a report. report_photos rows go with it via ON DELETE CASCADE.
       if (req.method === "DELETE" && reportId) {
-        const [rows] = await pool.query("SELECT owner FROM reports WHERE id = ?", [reportId]);
+        const [rows] = await pool.query("SELECT owner, status FROM reports WHERE id = ?", [reportId]);
         if (!rows.length) return sendJson(404, { error: { message: "Report not found" } });
         if (!canTouch(rows[0])) return sendJson(403, { error: { message: "Not your report" } });
+        // An approved report is the official record — it cannot be deleted. A
+        // reviewer reopens it first, which leaves an audit trail.
+        if (rows[0].status === "approved") {
+          return sendJson(409, {
+            error: { message: "This report has been approved and cannot be deleted. Ask a reviewer to reopen it first." },
+            code: "report_locked",
+            status: "approved"
+          });
+        }
         await pool.query("DELETE FROM reports WHERE id = ?", [reportId]);
-        writeAudit(user, "report.delete", { detail: reportId });
+        writeAudit(user, "report.delete", { detail: `${reportId} (${rows[0].status})` });
         return sendJson(200, { ok: true });
       }
       }

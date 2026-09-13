@@ -23,6 +23,33 @@ export const buildFooterLabel = (data, template) => {
   return `[${escapeHtml(title)} on ${escapeHtml(date)}]`;
 };
 
+// Approval stamp (plan 3.1): when a report carries review metadata we print a
+// summary block at the end of the document — submitted by/at and, once reviewed,
+// approved/rejected by/at plus the remarks. A draft has no review trail, so it
+// is omitted.
+export const buildApprovalStamp = (review) => {
+  if (!review || !review.status || review.status === "draft") return "";
+  const label =
+    review.status === "approved" ? "APPROVED" :
+    review.status === "submitted" ? "SUBMITTED FOR REVIEW" :
+    review.status === "rejected" ? "REJECTED" :
+    review.status.toUpperCase();
+  const lines = [];
+  if (review.submittedBy) {
+    lines.push(`Submitted by: ${escapeHtml(review.submittedBy)}` +
+      (review.submittedAt ? ` on ${escapeHtml(new Date(review.submittedAt).toLocaleString())}` : ""));
+  }
+  if (review.reviewedBy) {
+    lines.push(`Reviewed by: ${escapeHtml(review.reviewedBy)}` +
+      (review.reviewedAt ? ` on ${escapeHtml(new Date(review.reviewedAt).toLocaleString())}` : ""));
+  }
+  if (review.remarks) lines.push(`Remarks: ${escapeHtml(review.remarks)}`);
+  return `<div class="blk approval-stamp">` +
+    `<div class="approval-stamp-head">${label}</div>` +
+    `<div class="approval-stamp-body">${lines.map(l => `<div>${l}</div>`).join("")}</div>` +
+    `</div>`;
+};
+
 // Shared helpers for template-driven rendering.
 const beneficiaryFieldOf = (template) =>
   (template?.fields || []).find(f => f.type === "beneficiaries");
@@ -364,13 +391,15 @@ export const buildPdfBlocks = (data, photos, headerImgData, template, photoLayou
 
 // Opens a print window with dynamically paginated content blocks so the page
 // numbers ("PAGE X OF N") always match the actual printed pages.
-export const printReport = ({ data, photos, headerImgData, footerImgData, template, photoLayout = "classic" }) => {
+export const printReport = ({ data, photos, headerImgData, footerImgData, template, photoLayout = "classic", review = null }) => {
   const w = window.open("", "_blank");
   if (!w) return;
 
   photos = photos.slice(0, MAX_PHOTOS);
   data = normalizeReport(data, template);
   const blocks = buildPdfBlocks(data, photos, headerImgData, template, photoLayout);
+  const stamp = buildApprovalStamp(review);
+  if (stamp) blocks.push(stamp);
   const footerLabel = buildFooterLabel(data, template);
   const preloads = [headerImgData, footerImgData, FOOTER_IMG, ...photos.slice(0, MAX_PHOTOS)]
     .filter(Boolean)
@@ -427,6 +456,10 @@ export const printReport = ({ data, photos, headerImgData, footerImgData, templa
     .signature-name { margin-top: 14mm; font-weight: 700; text-align: center; text-transform: uppercase; }
     .signature-name + div { text-align: center; text-transform: uppercase; font-size: 9.5pt; }
     .copy-furnish { color: #0000cc; font-style: italic; font-size: 10pt; }
+    /* Approval stamp (plan 3.1): printed at the end of the document */
+    .approval-stamp { border: 1.5px solid #333; border-radius: 3px; font-size: 10pt; margin-top: 2mm; }
+    .approval-stamp-head { background: #333; color: #fff; font-weight: 700; text-align: center; letter-spacing: 1px; padding: 3px 8px; }
+    .approval-stamp-body { padding: 5px 10px; line-height: 1.7; }
     /* ILCDB After Activity Report — black-bordered form */
     .ilcdb-table { border: 1px solid #000; font-size: 10pt; }
     .ilcdb-table th { border: 1px solid #000; background: #fff; color: #000; padding: 3px 7px; text-align: center; }
@@ -969,9 +1002,28 @@ export const buildRtf = (data, photos, template) => {
   return rtf;
 };
 
-export const exportRtf = (data, photos, template) => {
+// Approval stamp for RTF export (plan 3.1): appended after the body, before the
+// closing brace, when the report carries review metadata.
+const stampRtf = (review) => {
+  if (!review || !review.status || review.status === "draft") return "";
+  const RESET = "\\pard\\plain\\f0\\fs22 ";
+  const label =
+    review.status === "approved" ? "APPROVED" :
+    review.status === "submitted" ? "SUBMITTED FOR REVIEW" :
+    review.status === "rejected" ? "REJECTED" :
+    review.status.toUpperCase();
+  let s = RESET + "{\\b\\fs20 " + rtfEscape(label) + "}\\par ";
+  if (review.submittedBy) s += RESET + "Submitted by: " + rtfEscape(review.submittedBy) + (review.submittedAt ? " on " + rtfEscape(new Date(review.submittedAt).toLocaleString()) : "") + "\\par ";
+  if (review.reviewedBy) s += RESET + "Reviewed by: " + rtfEscape(review.reviewedBy) + (review.reviewedAt ? " on " + rtfEscape(new Date(review.reviewedAt).toLocaleString()) : "") + "\\par ";
+  if (review.remarks) s += RESET + "Remarks: " + rtfEscape(review.remarks) + "\\par ";
+  return "\\par\\par" + s;
+};
+
+export const exportRtf = (data, photos, template, review = null) => {
   data = normalizeReport(data, template);
-  const rtf = buildRtf(data, photos, template);
+  let rtf = buildRtf(data, photos, template);
+  const stamp = stampRtf(review);
+  if (stamp) rtf = rtf.slice(0, -1) + stamp + "}";
   const blob = new Blob([rtf], { type: "application/rtf" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

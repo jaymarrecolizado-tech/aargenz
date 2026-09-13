@@ -2,8 +2,10 @@ import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
 import TemplateBuilder from "./TemplateBuilder.jsx";
 import UserManagement from "./UserManagement.jsx";
+import ReviewQueue from "./ReviewQueue.jsx";
 
-// Admin panel (Phase 8): personnel lists + template management + user accounts.
+// Admin panel (Phase 8): personnel lists + template management + user accounts
+// + the reviewer queue (plan 3.1).
 export default function AdminPanel({ templates, onPersonnelSaved, user }) {
   const [section, setSection] = useState("personnel");
   const [builderFor, setBuilderFor] = useState(null); // template id or "new"
@@ -12,8 +14,8 @@ export default function AdminPanel({ templates, onPersonnelSaved, user }) {
     <div style={{width:"100%", maxWidth:"760px"}}>
       <div className="panel" style={{padding:"24px"}}>
         <div style={{fontSize:"17px", fontWeight:"700", color:"var(--text)", marginBottom:"4px"}}>Administration</div>
-        <div style={{display:"flex", gap:"8px", margin:"12px 0 16px"}}>
-          {[["users","Users"],["personnel","Personnel"],["templates","Templates"],["ai","AI"],["audit","Audit Log"]].map(([s, lbl]) => (
+        <div style={{display:"flex", gap:"8px", margin:"12px 0 16px", flexWrap:"wrap"}}>
+          {[["users","Users"],["personnel","Personnel"],["review","Review Queue"],["templates","Templates"],["ai","AI"],["audit","Audit Log"]].map(([s, lbl]) => (
             <button key={s} onClick={() => setSection(s)} className={"seg" + (section === s ? " active" : "")}>{lbl}</button>
           ))}
         </div>
@@ -22,6 +24,8 @@ export default function AdminPanel({ templates, onPersonnelSaved, user }) {
           ? <PersonnelEditor templates={templates} onSaved={onPersonnelSaved}/>
           : section === "users"
           ? <UserManagement currentUser={user}/>
+          : section === "review"
+          ? <ReviewQueue/>
           : section === "ai"
           ? <AiStatusPanel/>
           : section === "audit"

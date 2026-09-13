@@ -32,11 +32,23 @@ export const api = {
   changePassword: (currentPassword, newPassword) =>
     req("api/auth/password", { method: "POST", body: { currentPassword, newPassword } }),
 
-  listReports: (all) => req(`api/reports${all ? "?all=1" : ""}`),
+  listReports: (all, status) => {
+    const qs = new URLSearchParams();
+    if (all) qs.set("all", "1");
+    if (status) qs.set("status", status);
+    const q = qs.toString();
+    return req(`api/reports${q ? "?" + q : ""}`);
+  },
   getReport: (id) => req(`api/reports/${id}`),
   createReport: (payload) => req("api/reports", { method: "POST", body: payload }),
   updateReport: (id, patch) => req(`api/reports/${id}`, { method: "PUT", body: patch }),
   deleteReport: (id) => req(`api/reports/${id}`, { method: "DELETE" }),
+
+  // Lifecycle transitions (plan 3.1). One call for every move — submit,
+  // withdraw, approve, reject, reopen — because the rules live server-side in
+  // one state machine. `remarks` is required when rejecting.
+  transitionReport: (id, action, remarks) =>
+    req(`api/reports/${id}/transition`, { method: "POST", body: { action, remarks } }),
 
   // Photos live in their own table (plan 2.6), so a 2 MB photo set no longer
   // rides along with every report read and every autosave. Replace-all keeps

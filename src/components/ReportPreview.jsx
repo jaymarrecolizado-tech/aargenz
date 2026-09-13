@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
 import { countGenders } from "../lib/report.js";
+import { ReadOnlyContext, useReadOnly } from "../lib/readonly.js";
 import EgovPreview from "./EgovPreview.jsx";
 import IlcdbPreview from "./IlcdbPreview.jsx";
 
@@ -19,13 +20,24 @@ function PhotoSlot({ src, index, onRemove }) {
 // Dispatcher: templates with their own layout render through their own
 // preview component. Kept hookless so switching templates can never
 // re-order the classic layout's hooks.
+//
+// `readOnly` (plan 3.1) is published through context rather than threaded
+// through every call site — see src/lib/readonly.js.
 export default function ReportPreview(props) {
-  if (props.template?.layout === "egov") return <EgovPreview {...props}/>;
-  if (props.template?.layout === "ilcdb") return <IlcdbPreview {...props}/>;
-  return <ClassicPreview {...props}/>;
+  const body = props.template?.layout === "egov"
+    ? <EgovPreview {...props}/>
+    : props.template?.layout === "ilcdb"
+    ? <IlcdbPreview {...props}/>
+    : <ClassicPreview {...props}/>;
+  return (
+    <ReadOnlyContext.Provider value={!!props.readOnly}>
+      {body}
+    </ReadOnlyContext.Provider>
+  );
 }
 
 function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFacilitator, onRemovePhoto, headerImg, footerImg, template, photoLayout = "classic", onLayoutChange }) {
+  const readOnly = useReadOnly();
   const [editField, setEditField] = useState(null);
   const [editValue, setEditValue] = useState("");
   const [editDeep, setEditDeep] = useState(null);
@@ -112,6 +124,8 @@ function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFaci
   };
 
   const renderEditable = (field, value, deep = null) => {
+    // Read-only mode (plan 3.1): no inline editor — just print the value.
+    if (readOnly) return <span>{value}</span>;
     if (editField === field && editDeep === deep) {
       return (
         <input
@@ -187,7 +201,7 @@ function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFaci
                 <td style={{padding:"5px 10px", border:"1px solid #ccc"}}>{renderEditable(`facilitators.${i}.name`, f.name, `facilitators.${i}.name`)}</td>
                 <td style={{padding:"5px 10px", border:"1px solid #ccc"}}>{renderEditable(`facilitators.${i}.office`, f.office, `facilitators.${i}.office`)}</td>
                 <td style={{padding:"4px 6px", border:"1px solid #ccc", textAlign:"center"}}>
-                  {onUpdate ? (
+                  {(!onUpdate || readOnly) ? f.gender : (
                     /* Dropdown keeps the stored value M/F so tallies stay exact;
                        countGenders still tolerates legacy free-text values. */
                     <select
@@ -199,9 +213,9 @@ function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFaci
                       <option value="M">M</option>
                       <option value="F">F</option>
                     </select>
-                  ) : f.gender}
+                  )}
                 </td>
-                {onRemoveFacilitator && (
+                {!readOnly && onRemoveFacilitator && (
                   <td style={{padding:"2px 4px", border:"1px solid #ccc", textAlign:"center"}}>
                     <button onClick={() => onRemoveFacilitator(i)} title="Remove facilitator" style={{border:"none", background:"transparent", color:"#cc0000", cursor:"pointer", fontWeight:"bold"}}>✕</button>
                   </td>
@@ -210,7 +224,7 @@ function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFaci
             ))}
           </tbody>
         </table>
-        {onAddFacilitator && (
+        {!readOnly && onAddFacilitator && (
           <div style={{marginBottom:"8px"}}>
             <button onClick={onAddFacilitator} style={{padding:"4px 12px", borderRadius:"14px", border:"1px solid #0000cc", background:"#fff", color:"#0000cc", fontSize:"11px", fontWeight:"600", cursor:"pointer"}}>+ Add Facilitator</button>
           </div>
@@ -287,7 +301,7 @@ function ClassicPreview({ data, photos, onUpdate, onAddFacilitator, onRemoveFaci
                   const slot = collageSlotStyle(photoLayout, i);
                   return (
                     <div key={i} style={{...slot, overflow:"hidden", background:"#f5f5f5", position:"relative"}}>
-                      <PhotoSlot src={p} index={i} onRemove={onRemovePhoto}/>
+                      <PhotoSlot src={p} index={i} onRemove={readOnly ? undefined : onRemovePhoto}/>
                     </div>
                   );
                 })}

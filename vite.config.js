@@ -29,6 +29,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.{js,jsx}"]
+    // server/ is included so server-side logic (the review state machine, for
+    // one) can be unit-tested directly instead of only through the API.
+    include: ["src/**/*.test.{js,jsx}", "server/**/*.test.js"]
   }
 });

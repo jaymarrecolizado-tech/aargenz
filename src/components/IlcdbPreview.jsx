@@ -1,5 +1,6 @@
 import React from "react";
 import { COLLAGE_LAYOUTS, collageGridStyle, collageSlotStyle } from "../lib/collage.js";
+import { useReadOnly } from "../lib/readonly.js";
 
 // ILCDB After Activity Report preview (layout: "ilcdb"). Faithfully mirrors
 // the official DICT Region II form:
@@ -20,13 +21,16 @@ const bold = { fontWeight: "bold" };
 const cell = { padding: "5px 8px", border: `1px solid ${INK}`, verticalAlign: "middle" };
 
 // Click-to-edit text, self-contained (same interaction as the other previews).
+// A submitted or approved report is locked (plan 3.1), so in read-only mode the
+// field renders as plain text instead of offering an editor that cannot save.
 function Editable({ path, value, onUpdate, style, placeholder, multiline = false }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
-  const start = () => { setDraft(value || ""); setEditing(true); };
-  const save = () => { onUpdate(path, draft); setEditing(false); };
+  const start = () => { if (readOnly) return; setDraft(value || ""); setEditing(true); };
+  const save = () => { if (!readOnly) onUpdate(path, draft); setEditing(false); };
 
-  if (editing) {
+  if (editing && !readOnly) {
     const shared = {
       autoFocus: true,
       value: draft,
@@ -41,8 +45,8 @@ function Editable({ path, value, onUpdate, style, placeholder, multiline = false
   return (
     <span
       onClick={start}
-      title="Click to edit"
-      style={{ cursor: "pointer", background: "#f8f8f8", padding: "2px 4px", borderRadius: "3px", ...style }}
+      title={readOnly ? undefined : "Click to edit"}
+      style={{ cursor: readOnly ? "default" : "pointer", background: readOnly ? "transparent" : "#f8f8f8", padding: "2px 4px", borderRadius: "3px", ...style }}
     >
       {value || <em style={{ color: "#999" }}>{placeholder || "Click to add"}</em>}
     </span>
@@ -60,8 +64,10 @@ function Box({ heading, children, headStyle }) {
 }
 
 // Signatory: personnel dropdown + free-text override, left-aligned like the
-// official form (bold uppercase name, italic position).
+// official form (bold uppercase name, italic position). In read-only mode the
+// dropdown and free-text editing are suppressed — the name/position just print.
 function Signatory({ label, id, data, personnel, onUpdate }) {
+  const readOnly = useReadOnly();
   const options = (personnel || []).filter(p => p && p.name);
   const knownIdx = options.findIndex(p => p.name === (data?.name || "") && (!p.position || p.position === (data?.position || "")));
   return (
@@ -73,7 +79,7 @@ function Signatory({ label, id, data, personnel, onUpdate }) {
       <div style={{ fontStyle: "italic" }}>
         <Editable path={`${id}.position`} value={data?.position || ""} onUpdate={onUpdate} placeholder="Position"/>
       </div>
-      {options.length > 0 && (
+      {!readOnly && options.length > 0 && (
         <select
           value={knownIdx >= 0 ? String(knownIdx) : "custom"}
           onChange={e => {
@@ -94,6 +100,7 @@ function Signatory({ label, id, data, personnel, onUpdate }) {
 }
 
 export default function IlcdbPreview({ data, photos, onUpdate, onRemovePhoto, headerImg, footerImg, template, photoLayout = "classic", onLayoutChange }) {
+  const readOnly = useReadOnly();
   const b = data.beneficiaries || {};
   const cats = ((template?.fields || []).find(f => f.type === "beneficiaries")?.categories) || [];
   const num = v => Number(v) || 0;
@@ -102,6 +109,8 @@ export default function IlcdbPreview({ data, photos, onUpdate, onRemovePhoto, he
   const totalFemale = cats.reduce((s, c) => s + num(cap(c, "female")), 0);
   const paras = value => String(value || "").split(/\n+/).map(s => s.trim()).filter(Boolean);
 
+  // In read-only mode (plan 3.1) the add/remove controls disappear — the report
+  // is locked server-side, so adding or removing items locally would just fail.
   const bulletList = (id, itemKey, placeholder) => (
     <>
       {(data[id] || []).map((it, i) => (
@@ -110,13 +119,17 @@ export default function IlcdbPreview({ data, photos, onUpdate, onRemovePhoto, he
           <span style={{ flex: 1 }}>
             <Editable path={`${id}.${i}.${itemKey}`} value={it[itemKey]} onUpdate={(p, v) => onUpdate(id, (data[id] || []).map((x, j) => (j === i ? { ...x, [itemKey]: v } : x)))} placeholder={placeholder}/>
           </span>
-          <button onClick={() => onUpdate(id, (data[id] || []).filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+          {!readOnly && (
+            <button onClick={() => onUpdate(id, (data[id] || []).filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "none", color: "#cc0000", cursor: "pointer", fontWeight: "bold" }}>✕</button>
+          )}
         </div>
       ))}
-      <button
-        onClick={() => onUpdate(id, [...(data[id] || []), { [itemKey]: "" }])}
-        style={{ marginLeft: "14px", padding: "3px 12px", borderRadius: "14px", border: "1px solid #000", background: "#fff", fontSize: "11px", fontWeight: "600", cursor: "pointer" }}
-      >+ Add entry</button>
+      {!readOnly && (
+        <button
+          onClick={() => onUpdate(id, [...(data[id] || []), { [itemKey]: "" }])}
+          style={{ marginLeft: "14px", padding: "3px 12px", borderRadius: "14px", border: "1px solid #000", background: "#fff", fontSize: "11px", fontWeight: "600", cursor: "pointer" }}
+        >+ Add entry</button>
+      )}
     </>
   );
 
@@ -278,7 +291,7 @@ export default function IlcdbPreview({ data, photos, onUpdate, onRemovePhoto, he
       {/* VIII. PHOTO DOCUMENTATION */}
       <Box heading="VIII.&nbsp;&nbsp;PHOTO DOCUMENTATION">
         <div style={{ marginBottom: "10px", display: "flex", alignItems: "center", gap: "12px" }}>
-          {photos.length > 0 && onLayoutChange && (
+          {photos.length > 0 && onLayoutChange && !readOnly && (
             <select value={photoLayout} onChange={e => onLayoutChange(e.target.value)} style={{ fontSize: "12px", padding: "3px 8px", borderRadius: "6px", border: "1px solid #ccd5f0" }} title="Photo collage layout">
               {COLLAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
             </select>
@@ -293,7 +306,7 @@ export default function IlcdbPreview({ data, photos, onUpdate, onRemovePhoto, he
                 <div key={i} style={{ ...slot, position: "relative", display: "flex", flexDirection: "column" }}>
                   <div style={{ flex: 1, overflow: "hidden", background: "#f5f5f5", position: "relative" }}>
                     <img src={p} alt={`Photo ${i + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
-                    {onRemovePhoto && (
+                    {onRemovePhoto && !readOnly && (
                       <button onClick={() => onRemovePhoto(i)} title="Remove photo" style={{ position: "absolute", top: "4px", right: "4px", width: "22px", height: "22px", borderRadius: "50%", border: "none", background: "rgba(204,0,0,0.85)", color: "#fff", cursor: "pointer", fontWeight: "bold", lineHeight: 1 }}>✕</button>
                     )}
                   </div>

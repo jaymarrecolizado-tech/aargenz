@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../lib/api.js";
+import { canTransition } from "../lib/lifecycle.js";
 
 // Fields that identify *when* an activity took place. A duplicate describes a
 // new activity, so these are reset rather than carried over (plan 3.4) — the
@@ -7,13 +8,38 @@ import { api } from "../lib/api.js";
 // field in two of them).
 const ACTIVITY_TIME_FIELDS = ["dateTime", "time", "timeOfArrival"];
 
-// "My Reports" list (Phase 3.3): open, duplicate, or delete saved drafts.
+// Lifecycle status badge (plan 3.1). Colour-coded so each report's state reads
+// at a glance.
+const STATUS_LABELS = { draft: "Draft", submitted: "Submitted", approved: "Approved", rejected: "Rejected" };
+const STATUS_COLORS = {
+  draft:     { bg: "#eef1f6", fg: "#475467" },
+  submitted: { bg: "#fef3e2", fg: "#994d00" },
+  approved:  { bg: "#e6f4ea", fg: "#137333" },
+  rejected:  { bg: "#fdecea", fg: "#b71c1c" }
+};
+function StatusBadge({ status }) {
+  const c = STATUS_COLORS[status] || STATUS_COLORS.draft;
+  return (
+    <span style={{
+      display: "inline-block", padding: "1px 9px", borderRadius: "10px",
+      fontSize: "10px", fontWeight: "700", background: c.bg, color: c.fg,
+      textTransform: "uppercase", letterSpacing: "0.4px"
+    }}>
+      {STATUS_LABELS[status] || status || "Draft"}
+    </span>
+  );
+}
+
+// "My Reports" list (Phase 3.3): open, submit/withdraw/approve/reject/reopen,
+// duplicate, or delete saved drafts (plan 3.1 adds the lifecycle actions).
 export default function MyReports({ user, onOpen }) {
   const [reports, setReports] = useState(null);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [msg, setMsg] = useState("");
 
   const load = () => {
+    setMsg("");
     api.listReports(user.role === "admin")
       .then(setReports)
       .catch(e => setError(e.message));
@@ -88,6 +114,28 @@ export default function MyReports({ user, onOpen }) {
     }
   };
 
+  // Lifecycle actions (plan 3.1). Each calls the single transition endpoint,
+  // which enforces the state machine; we only show the buttons the server would
+  // allow for this user. Rejection must supply a reason.
+  const act = async (r, action, remarks) => {
+    try {
+      await api.transitionReport(r.id, action, remarks);
+      setMsg(`"${r.title || "report"}" ${action}ed.`);
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+  const reject = (r) => {
+    const rm = window.prompt(`Reason for rejecting "${r.title || "this report"}" (required):`);
+    if (rm == null) return;
+    if (!rm.trim()) { window.alert("A reason is required to reject a report."); return; }
+    act(r, "reject", rm.trim());
+  };
+
+  const isOwner = (r) => r.owner === user.id || r.owner_name === user.username;
+  const can = (r, action) => canTransition(r.status, action, { role: user.role, isOwner: isOwner(r) }).ok;
+
   return (
     <div style={{width:"100%", maxWidth:"850px"}}>
       <div className="panel" style={{padding:"24px"}}>
@@ -102,6 +150,7 @@ export default function MyReports({ user, onOpen }) {
         <div style={{fontSize:"12px", color:"var(--muted)", marginBottom:"16px"}}>Saved drafts sync automatically as you work. Open one to continue where you left off.</div>
 
         {error && <div className="err-box">{error}</div>}
+        {msg && <div className="ok-box">{msg}</div>}
         {reports === null && !error && <div style={{color:"var(--muted)", fontSize:"13px"}}>Loading…</div>}
 
         {reports?.length === 0 && (
@@ -112,8 +161,8 @@ export default function MyReports({ user, onOpen }) {
 
         {(reports || []).map(r => (
           <div key={r.id} style={{
-            display:"flex", alignItems:"center", gap:"12px", padding:"10px 12px",
-            borderBottom:"1px solid var(--border)"
+            display:"flex", alignItems:"center", gap:"8px", padding:"10px 12px",
+            borderBottom:"1px solid var(--border)", flexWrap:"wrap"
           }}>
             <div style={{flex:1, minWidth:0}}>
               <div style={{fontWeight:"600", fontSize:"14px", color:"var(--text)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>
@@ -122,17 +171,25 @@ export default function MyReports({ user, onOpen }) {
                   <span style={{marginLeft:"8px", fontSize:"11px", color:"var(--accent)"}}>by {r.owner_name}</span>
                 )}
               </div>
-              <div style={{fontSize:"11px", color:"var(--muted)"}}>
+              <div style={{fontSize:"11px", color:"var(--muted)", display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap"}}>
                 {r.control_no && (
-                  <span style={{color:"var(--accent)", fontWeight:"600"}}>{r.control_no} · </span>
+                  <span style={{color:"var(--accent)", fontWeight:"600"}}>{r.control_no}</span>
                 )}
-                {r.template_id} · {new Date(r.updated_at).toLocaleString()} · {r.status}
-                {r.photos_count ? ` · ${r.photos_count} photo${r.photos_count === 1 ? "" : "s"}` : ""}
+                <span>{r.template_id}</span>
+                <span>·</span>
+                <span>{new Date(r.updated_at).toLocaleString()}</span>
+                {r.photos_count ? <span>· {r.photos_count} photo{r.photos_count === 1 ? "" : "s"}</span> : null}
+                <StatusBadge status={r.status}/>
               </div>
             </div>
             <button onClick={() => open(r)} className="mini-btn primary">Open</button>
+            {can(r, "submit") && <button onClick={() => act(r, "submit")} className="mini-btn">Submit</button>}
+            {can(r, "withdraw") && <button onClick={() => act(r, "withdraw")} className="mini-btn">Withdraw</button>}
+            {can(r, "approve") && <button onClick={() => act(r, "approve")} className="mini-btn primary" style={{background:"#15803d", borderColor:"#15803d", color:"#fff"}}>Approve</button>}
+            {can(r, "reject") && <button onClick={() => reject(r)} className="mini-btn danger">Reject</button>}
+            {can(r, "reopen") && <button onClick={() => act(r, "reopen")} className="mini-btn">Reopen</button>}
             <button onClick={() => duplicate(r)} className="mini-btn">Duplicate</button>
-            <button onClick={() => remove(r)} className="mini-btn danger">Delete</button>
+            {r.status !== "approved" && <button onClick={() => remove(r)} className="mini-btn danger">Delete</button>}
           </div>
         ))}
       </div>
