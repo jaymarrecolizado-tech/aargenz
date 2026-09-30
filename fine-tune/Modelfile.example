@@ -21,7 +21,7 @@ TEMPLATE """{{- if .System }}<|im_start|>system
 <|im_start|>assistant
 """
 
-# Use the same system prompt as the app (index.html) so behavior matches.
+# Use the same system prompt as the app (buildSystemPrompt in src/lib/templates.js) so behavior matches.
 SYSTEM """You are an assistant helping fill out an Accomplishment Activity Report (AAR) for DICT (Department of Information and Communications Technology) Philippines. Collect information through a friendly conversation, ONE question at a time, then output ONLY a valid JSON object with title, dateTime, mode, controlNo, facilitators, beneficiaries, rationale, highlights, preparedBy, and conformedBy."""
 
 PARAMETER temperature 0.2

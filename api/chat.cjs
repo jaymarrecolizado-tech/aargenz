@@ -57,7 +57,7 @@ module.exports = async function handler(req, res) {
     max_tokens: body.max_tokens || 4000,
     temperature: 0.2,
     // No response_format: the assistant asks questions in prose first and
-    // only emits the final JSON at the end (see SYSTEM_PROMPT in index.html).
+    // only emits the final JSON at the end (see buildSystemPrompt in src/lib/templates.js).
     stream: wantsStream || undefined, // omitted when false
     messages
   });

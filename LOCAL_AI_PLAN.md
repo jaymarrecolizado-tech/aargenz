@@ -28,17 +28,18 @@ so the swap is mostly a base-URL + model-name change.
 |---|---|---|
 | **1. Provider switch** | `AI_PROVIDER`/`LOCAL_*` config in `chatCompletion`, `server.js`, `api/chat.js`, `config.example.js`; `temperature: 0.2` | ✅ **Done** |
 | **6. UX polish** | Provider/model dropdown in the header (persists to localStorage); `auto` = local first, Groq fallback | ✅ **Done** |
-| **3. Data collection** | "📥 Dataset" button exports the current report as a sharegpt training example; `scripts/generate-dataset.js` generates 500–2,000 synthetic teacher transcripts | ✅ **Code done** (run the script with a Groq key) |
+| **3. Data collection** | "📥 Dataset" button exports the current report as a sharegpt training example | ⚠️ **Button only** — the bulk generator `scripts/generate-dataset.js` was cut: it crashed on load (CommonJS in an ESM package) and read a `SYSTEM_PROMPT` constant `index.html` no longer has |
 | **5. Eval harness** | `scripts/evaluate.js` replays conversations and scores JSON-validity + schema completeness using the app's own `extractJson`/`normalizeReport` | ✅ **Code done** |
 | **4. Fine-tune** | `fine-tune/train.py` (Unsloth QLoRA → merged 16-bit + GGUF Q4_K_M) + `fine-tune/Modelfile.example` for Ollama | ✅ **Code done** (needs a GPU to run) |
 | **2. Zero-shot trial** | Install Ollama, pull a model, point the app at it, run 10 real reports | ⏳ **Your turn** (needs hardware) |
 
 **Getting started (once Ollama is installed):**
 1. `ollama pull qwen3:14b` (or `qwen3:8b` on 8 GB VRAM)
-2. Run the app: `node server.js` (server mode) — or open `index.html` and pick
+2. Run the app: `node server.js` (server mode) — or `npm run dev` and open
+   http://localhost:5173, then pick
    **Local** in the header dropdown (start Ollama with `OLLAMA_ORIGINS=*` for
    direct browser access)
-3. Try a few reports, then `GROQ_API_KEY=... node scripts/generate-dataset.js --count 200`
+3. Export a few reports with the "📥 Dataset" button and append them into one JSONL
 4. Fine-tune: `python fine-tune/train.py --base Qwen/Qwen3-14B --dataset dataset.jsonl`
 5. `ollama create aar-local -f fine-tune/Modelfile.example` and switch `LOCAL_MODEL=aar-local`
 
@@ -163,16 +164,18 @@ ideal for distillation onto a small model.
    tab exports the current report as a sharegpt example
    `{messages: [system, ...conversation, finalJSON]}`. Append several exports
    into one JSONL.
-2. **Synthetic distillation (bulk).** `scripts/generate-dataset.js` drives the
-   live Groq model as the *teacher*: for each randomized template (1–15
+2. **Synthetic distillation (bulk).** ⚠️ **Not built** — `scripts/generate-dataset.js`
+   was cut (it could not run). Re-create it when a real corpus is wanted: drive the
+   live Groq model as the *teacher* — for each randomized template (1–15
    facilitators, all beneficiary combinations, a list of DICT/eLGU topics,
-   short vs. long answers, "done" shortcuts), it records the full
+   short vs. long answers, "done" shortcuts), record the full
    teacher-driven transcript → final JSON. Target: **500–2,000 examples.**
 3. **Edge cases.** Missing values, zero beneficiaries, mixed-case gender,
    multiple facilitators, very long rationale — whatever the eval (below) fails.
 
-Format each example as sharegpt-style messages using the **exact**
-`SYSTEM_PROMPT` from `index.html` as the system message, the conversation as
+Format each example as sharegpt-style messages using the **exact** system
+message returned by `buildSystemPrompt(template)` in `src/lib/templates.js`,
+the conversation as
 user/assistant turns, and the final JSON as the last assistant turn. Include the
 JSON schema in a fraction of examples.
 

@@ -3,7 +3,7 @@
 
 Trains a small instruct model to reproduce the live model's behavior
 (chat -> final AAR JSON) using a sharegpt-format JSONL dataset produced by
-scripts/generate-dataset.js or the app's "Download dataset" button.
+the app's "Download dataset" button.
 
 Runs on a GPU: a free Colab T4 works for 7-8B bases; 16GB+ VRAM for 14B.
 

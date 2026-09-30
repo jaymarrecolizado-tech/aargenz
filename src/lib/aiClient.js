@@ -61,7 +61,7 @@ export const openAiBody = (messages, model, extra = {}) => JSON.stringify({
   max_tokens: 4000,
   temperature: 0.2, // lower temperature = more deterministic output
   // NOTE: no response_format here on purpose. The assistant collects data
-  // ONE question at a time (see SYSTEM_PROMPT) and only emits the final
+  // ONE question at a time (see buildSystemPrompt) and only emits the final
   // JSON at the end; forcing json_object on every turn makes strict models
   // (e.g. Groq's gpt-oss-120b) reject ordinary question turns. The final
   // JSON is guaranteed by the system prompt + robust extractJson().

@@ -3,8 +3,8 @@
 //
 // Replays held-out conversations from a dataset against a model endpoint and
 // scores JSON-validity + schema completeness, reusing the app's own
-// extractJson / normalizeReport logic (read from index.html so they stay in
-// sync with the app).
+// extractJson / normalizeReport — imported directly, so the eval cannot drift
+// from the app.
 //
 // Usage:
 //   # score the local model
@@ -16,30 +16,12 @@
 //
 // Writes a summary to stdout and a full report to --out (default eval-report.json).
 
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { extractJson, normalizeReport } from "../src/lib/report.js";
 
-// ---------------------------------------------------------------------------
-// Pull extractJson / normalizeReport / DEFAULT_REPORT from index.html so the
-// eval uses the exact same validation logic as the app.
-// ---------------------------------------------------------------------------
-
-function loadAppLogic() {
-  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
-  const start = html.indexOf("const DEFAULT_REPORT");
-  const end = html.indexOf("function ReportPreview");
-  if (start < 0 || end < 0) throw new Error("Could not locate app logic in index.html");
-  const slice = html.slice(start, end);
-  const fn = new Function(
-    "CONFIG",
-    "localStorage",
-    slice + "; return { extractJson, normalizeReport, DEFAULT_REPORT };"
-  );
-  // Stub browser globals the app logic touches at load time.
-  return fn({}, { getItem: () => null, setItem: () => {}, removeItem: () => {} });
-}
-
-const { extractJson, normalizeReport, DEFAULT_REPORT } = loadAppLogic();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Schema completeness check
