@@ -3,6 +3,17 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "contributors": [
+    {
+      "name": "JE Lite",
+      "email": "jaymar.recolizado@dict.gov.ph",
+      "url": "https://github.com/jaymarrecolizado-tech"
+    },
+    {
+      "name": "DietherAbad",
+      "url": "https://github.com/DietherAbad"
+    }
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
